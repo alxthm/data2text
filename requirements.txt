@@ -1,0 +1,13 @@
+torch
+PyYAML
+tqdm
+#dgl-cu100==0.4.2  # version used by cycleGT, but not available on python 3.9
+dgl-cu102
+#dgl
+numpy
+transformers==2.3.0
+scikit-learn==0.22
+#git+git://github.com/salaniz/pycocoevalcap  # why not simply pip install?
+pycocoevalcap  # if issues with python <3.7, try pip install numpy first
+mlflow
+pyarrow
