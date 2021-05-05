@@ -38,4 +38,4 @@ main:
     dev_file: "dev.json"
     test_file: "test.json"
     display: True
-    mode: "sup" #['sup', 'cold_unsup', 'warm_unsup']
+    mode: "cold_unsup" #['sup', 'cold_unsup', 'warm_unsup']

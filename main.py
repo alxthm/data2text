@@ -288,7 +288,7 @@ def eval_g2t(pool, _type, vocab, model, config, global_step, display=True):
     for k, v in metrics.items():
         logging.info(f"{k} {v}")
 
-    mlflow.log_artifact("hyp.txt", "g2t_hyp")
+    mlflow.log_artifact("hyp.txt", f"g2t_hyp_{global_step}")
     mlflow.log_metrics(metrics, step=global_step)
     return ret[0][-1]
 
@@ -367,7 +367,7 @@ def eval_t2g(pool, _type, vocab, model, config, global_step, display=True):
     f1_macro = f1_score(ref, hyp, average="macro", labels=pos_label, zero_division=0)
 
     logging.info("F1 micro {0:} F1 macro {1:}".format(f1_micro, f1_macro))
-    mlflow.log_artifact("t2g_show.txt", "t2g_show")
+    mlflow.log_artifact("t2g_show.txt", f"t2g_show_{global_step}")
     mlflow.log_metrics(
         {f"{_type}_f1_micro": f1_micro, f"{_type}_f1_macro": f1_macro}, step=global_step
     )
@@ -636,7 +636,10 @@ def train(_type, config, load):
                 )
             if e > best_t2g:
                 best_t2g = max(best_t2g, e)
-                torch.save(model_t2g.state_dict(), config["t2g"]["save"] + "X" + "best")
+                file_name = config["t2g"]["save"] + "X" + "best"
+                torch.save(model_t2g.state_dict(), file_name)
+                mlflow.log_artifact(file_name, file_name)
+
             e = eval_g2t(
                 pool,
                 "dev",
@@ -648,7 +651,9 @@ def train(_type, config, load):
             )
             if e > best_g2t:
                 best_g2t = max(best_g2t, e)
-                torch.save(model_g2t.state_dict(), config["g2t"]["save"] + "X" + "best")
+                file_name = config["g2t"]["save"] + "X" + "best"
+                torch.save(model_g2t.state_dict(), file_name)
+                mlflow.log_artifact(file_name, file_name)
             if i == config["main"]["pre_epoch"]:
                 torch.save(model_t2g.state_dict(), config["t2g"]["save"] + "X" + "mid")
                 torch.save(model_g2t.state_dict(), config["g2t"]["save"] + "X" + "mid")
