@@ -9,5 +9,9 @@ transformers==2.3.0
 scikit-learn==0.22
 #git+git://github.com/salaniz/pycocoevalcap  # why not simply pip install?
 pycocoevalcap  # if issues with python <3.7, try pip install numpy first
+
+# what i added - test
 mlflow
-pyarrow
+pyarrow  # to log things with mlflow
+pytorch-lightning
+omegaconf
