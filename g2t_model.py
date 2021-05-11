@@ -328,7 +328,7 @@ class GraphWriter(nn.Module):
         _z = self.vae_pfc(_z.mean(1))
         return _z[:, : self.config["vae_dim"]], _z[:, self.config["vae_dim"] :]
 
-    def forward(self, batch, beam_size=-1):
+    def forward(self, batch, beam_size=-1, vae_z=None):
         # three modes:
         # beam_size==-1 means training,
         # beam_size==1 means greedy decoding,
@@ -421,7 +421,8 @@ class GraphWriter(nn.Module):
         else:
             if beam_size == 1:
                 # greedy
-                vae_z = torch.exp(0.5 * plog_sigma) * torch.randn_like(plog_sigma) + pmu
+                if vae_z is None:
+                    vae_z = torch.exp(0.5 * plog_sigma) * torch.randn_like(plog_sigma) + pmu
                 device = g_ent.device
                 B = g_ent.shape[0]
                 seq = (
@@ -462,7 +463,8 @@ class GraphWriter(nn.Module):
                 return seq
             else:
                 # beam search
-                vae_z = torch.exp(0.5 * plog_sigma) * torch.randn_like(plog_sigma) + pmu
+                if vae_z is None:
+                    vae_z = torch.exp(0.5 * plog_sigma) * torch.randn_like(plog_sigma) + pmu
                 device = g_ent.device
                 B = g_ent.shape[0]
                 BSZ = B * beam_size

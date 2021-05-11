@@ -288,7 +288,7 @@ def eval_g2t(pool, _type, vocab, model, config, global_step, display=True):
     for k, v in metrics.items():
         logging.info(f"{k} {v}")
 
-    mlflow.log_artifact("hyp.txt", f"g2t_hyp_{global_step}")
+    mlflow.log_artifact("hyp.txt", f"g2t_hyp/{global_step}")
     mlflow.log_metrics(metrics, step=global_step)
     return ret[0][-1]
 
@@ -367,7 +367,7 @@ def eval_t2g(pool, _type, vocab, model, config, global_step, display=True):
     f1_macro = f1_score(ref, hyp, average="macro", labels=pos_label, zero_division=0)
 
     logging.info("F1 micro {0:} F1 macro {1:}".format(f1_micro, f1_macro))
-    mlflow.log_artifact("t2g_show.txt", f"t2g_show_{global_step}")
+    mlflow.log_artifact("t2g_show.txt", f"t2g_show/{global_step}")
     mlflow.log_metrics(
         {f"{_type}_f1_micro": f1_micro, f"{_type}_f1_macro": f1_macro}, step=global_step
     )
@@ -479,6 +479,8 @@ def train(_type, config, load):
     config["t2g"]["device"] = device
     print("Preparing data...")
     pool, vocab = prep_data(config["main"], load=load)
+    torch.save(pool, "pool.pt")
+    mlflow.log_artifact("pool.pt", "code/pool.pt")
     print("Preparing model...")
     model_g2t, model_t2g = prep_model(config, vocab)
     model_g2t.to(device)
@@ -634,9 +636,12 @@ def train(_type, config, load):
                     global_step,
                     display=config["main"]["display"],
                 )
-            if e > best_t2g:
+            if e > best_t2g or i % 15 == 0:
+                if e > best_t2g:
+                    file_name = f'{config["t2g"]["save"]}_best_ep{i}'
+                else:
+                    file_name = f'{config["t2g"]["save"]}_ep{i}'
                 best_t2g = max(best_t2g, e)
-                file_name = config["t2g"]["save"] + "X" + "best"
                 torch.save(model_t2g.state_dict(), file_name)
                 mlflow.log_artifact(file_name, file_name)
 
@@ -649,9 +654,12 @@ def train(_type, config, load):
                 global_step,
                 display=config["main"]["display"],
             )
-            if e > best_g2t:
+            if e > best_g2t or i % 15 == 0:
+                if e > best_g2t:
+                    file_name = f'{config["g2t"]["save"]}_best_ep{i}'
+                else:
+                    file_name = f'{config["g2t"]["save"]}_ep{i}'
                 best_g2t = max(best_g2t, e)
-                file_name = config["g2t"]["save"] + "X" + "best"
                 torch.save(model_g2t.state_dict(), file_name)
                 mlflow.log_artifact(file_name, file_name)
             if i == config["main"]["pre_epoch"]:
@@ -720,6 +728,11 @@ def main(timestamp: str):
         for k1 in config.keys():
             for k2 in config[k1].keys():
                 mlflow.log_param(f"{k1}_{k2}", config[k1][k2])
+        # save source files and vocab
+        for f in os.listdir():
+            if f.endswith(".py") or f.endswith(".yaml") or f == "tmp_vocab.pt":
+                mlflow.log_artifact(f, f"code/{f}")
+
         # train
         train("train", config, load="tmp_vocab.pt")
 
