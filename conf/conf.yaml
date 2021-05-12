@@ -1,0 +1,42 @@
+dim_h: 512
+dim_z: 10
+
+g2t:
+    enc_lstm_layers: 2
+    n_head: 4 # number of attention heads
+    head_dim: 128 # dim of each attention head
+    emb_drop: 0.0
+    attn_drop: 0.1
+    drop: 0.1 # FFN dropout
+    n_layers_gat: 2 # number of layers of GAT
+    clip: 1.0 # gradient clipping
+
+    weight_decay: 0.0
+    batch_size: 32
+    beam_size: 5
+    beam_max_len: 50
+    lr: 2.0e-4
+    lp: 1.0 # length penalty
+    graph_enc: "gtrans"
+    save: "g2t_model.pt"
+t2g:
+    drop: 0.0
+    clip: 1.0
+
+    batch_size: 32
+    lr: 5.0e-5
+    save: "t2g_model.pt"
+    weight_decay: 0.0
+
+main:
+    n_epoch: 50
+
+    split: 1.1 # proportion of training dataset to consider (does nothing if >=1)
+    pre_epoch: 10  # warmup epoch if using the warmup
+    seed: 654321 
+    batch_size: 32
+    train_file: "train.json"
+    dev_file: "dev.json"
+    test_file: "test.json"
+    display: True
+    mode: "cold_unsup" #['sup', 'cold_unsup', 'warm_unsup']
