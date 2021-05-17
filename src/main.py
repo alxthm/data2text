@@ -4,8 +4,13 @@ from datetime import datetime
 from pathlib import Path
 
 import mlflow
+import numpy as np
 import pytorch_lightning as pl
 import shutil
+
+import random
+
+import torch
 from omegaconf import OmegaConf
 from pytorch_lightning.loggers import MLFlowLogger
 
@@ -27,6 +32,14 @@ def main():
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf.yaml")
     print(OmegaConf.to_yaml(conf))
+
+    # seed everything # todo: use pl?
+    random.seed(conf.seed)
+    torch.manual_seed(conf.seed)
+    np.random.seed(conf.seed)
+    torch.cuda.manual_seed_all(conf.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # Save and log config/code
     mlf_logger = MLFlowLogger(
@@ -54,16 +67,14 @@ def main():
     ]:
         mlf_logger.experiment.log_artifact(mlf_logger.run_id, path)
 
-    # TODO: save full requirements for reproducibility!!!
-    #   pip list --format=freeze > requirements.txt
-    #   (cf https://dagshub.com/blog/setting-up-data-science-workspace-with-docker/)
-
     # train
     # todo: log checkpoints to mlflow as well
     model = CycleCVAE(
         text_vocab=webnlg.text_vocab,
         ent_vocab=webnlg.ent_vocab,
         rel_vocab=webnlg.rel_vocab,
+        tokenizer=webnlg.tokenizer,
+        tot_epoch=conf.tot_epoch,
         dim_h=conf.dim_h,
         dim_z=conf.dim_z,
         enc_lstm_layers=conf.g2t.enc_lstm_layers,
@@ -73,13 +84,21 @@ def main():
         attn_drop=conf.g2t.attn_drop,
         drop=conf.g2t.drop,
         n_layers_gat=conf.g2t.n_layers_gat,
+        g2t_lr=conf.g2t.lr,
+        g2t_weight_decay=conf.g2t.weight_decay,
+        beam_size=conf.g2t.beam_size,
+        beam_max_len=conf.g2t.beam_max_len,
+        length_penalty=conf.g2t.length_penalty,
         t2g_drop=conf.t2g.drop,
+        t2g_lr=conf.t2g.lr,
+        t2g_weight_decay=conf.t2g.weight_decay,
+        gradient_clip_val=conf.grad_clip,
     )
     # todo: test if lightning gives an error for manual optim + clip grad val
     #   then comment on https://github.com/PyTorchLightning/pytorch-lightning/issues/6328
     #   to request improving documentation since this PR removed the hint
     #   (https://github.com/PyTorchLightning/pytorch-lightning/pull/6907)
-    trainer = pl.Trainer(logger=mlf_logger, max_epochs=conf.main.tot_epoch)
+    trainer = pl.Trainer(logger=mlf_logger, max_epochs=conf.tot_epoch)
     trainer.fit(model, datamodule=webnlg)
 
     trainer.test(datamodule=webnlg)

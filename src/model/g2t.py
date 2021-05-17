@@ -268,11 +268,15 @@ class G2T(nn.Module):
         attn_drop: float,
         drop: float,
         n_layers_gat: int,
+        beam_max_len: int,
+        length_penalty: float,
     ):
         super(G2T, self).__init__()
         self.text_vocab = text_vocab
         self.ent_vocab = ent_vocab
         self.rel_vocab = rel_vocab
+        self.beam_max_len = beam_max_len
+        self.length_penalty = length_penalty
 
         dec_dim_in = dim_h * 2
         self.dim_z = dim_z
@@ -448,7 +452,7 @@ class G2T(nn.Module):
                     .to(device)
                     * self.text_vocab("<BOS>")
                 ).unsqueeze(1)
-                for t in range(self.config["beam_max_len"]):
+                for t in range(self.beam_max_len):
                     _inp = seq[:, -1]
                     xt = replace_ent(
                         seq[:, -1], ent_enc, len(self.text_vocab), self.tar_emb
@@ -506,7 +510,7 @@ class G2T(nn.Module):
                 beam_best_seq = torch.zeros(B, 1).long().to(device)
                 beam_score = torch.zeros(B, beam_size).to(device)
                 done_flag = torch.zeros(B, beam_size).to(device)
-                for t in range(self.config["beam_max_len"]):
+                for t in range(self.beam_max_len):
                     _inp = beam_seq[:, :, -1].view(-1)
                     _mask = (_inp >= len(self.text_vocab)).long()
                     xt = replace_ent(
@@ -532,7 +536,7 @@ class G2T(nn.Module):
                     pred = torch.cat([pred_v, pred_c], -1).view(B, beam_size, -1)
                     for ban_item in ["<BOS>", "<PAD>", "<UNK>"]:
                         pred[:, :, self.text_vocab(ban_item)] = -1e8
-                    if t == self.config["beam_max_len"] - 1:  # force ending
+                    if t == self.beam_max_len - 1:  # force ending
                         tt = pred[:, :, self.text_vocab("<EOS>")]
                         pred = pred * 0 - 1e8
                         pred[:, :, self.text_vocab("<EOS>")] = tt
@@ -548,7 +552,7 @@ class G2T(nn.Module):
                     else:
                         _, new_idx = score.topk(dim=-1, k=beam_size)
                     new_src, new_score, new_word, new_done = [], [], [], []
-                    LP = beam_seq.size(2) ** self.config["lp"]  # length penalty
+                    LP = beam_seq.size(2) ** self.length_penalty  # length penalty
                     prefix_idx = torch.arange(B).to(device)[:, None]
                     new_word = word[prefix_idx, new_idx]
                     new_score = score[prefix_idx, new_idx]

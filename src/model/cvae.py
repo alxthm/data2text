@@ -37,6 +37,8 @@ class CycleCVAE(LightningModule):
         g2t_lr: float,
         g2t_weight_decay: float,
         beam_size: int,
+        beam_max_len: int,
+        length_penalty: float,
         t2g_drop: float,
         t2g_lr: float,
         t2g_weight_decay: float,
@@ -80,6 +82,8 @@ class CycleCVAE(LightningModule):
             attn_drop=attn_drop,
             drop=drop,
             n_layers_gat=n_layers_gat,
+            beam_max_len=beam_max_len,
+            length_penalty=length_penalty,
         )
         self.t2g_model = T2G(
             relation_types=len(rel_vocab), d_model=dim_h, dropout=t2g_drop
