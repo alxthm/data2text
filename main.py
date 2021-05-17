@@ -472,6 +472,7 @@ def back_translation(
 
 
 def train(_type, config, load):
+    # _type="train" always actually
     dev_id = 0
     device = torch.device(dev_id) if torch.cuda.is_available() else torch.device("cpu")
     print(f"Training on device {device}")
@@ -638,7 +639,8 @@ def train(_type, config, load):
                 )
             if e > best_t2g or i % 15 == 0:
                 if e > best_t2g:
-                    file_name = f'{config["t2g"]["save"]}_best_ep{i}'
+                    file_name = f'{config["t2g"]["save"]}_best'
+                    logging.info(f'best model so far saved, epoch {i}')
                 else:
                     file_name = f'{config["t2g"]["save"]}_ep{i}'
                 best_t2g = max(best_t2g, e)
@@ -656,7 +658,8 @@ def train(_type, config, load):
             )
             if e > best_g2t or i % 15 == 0:
                 if e > best_g2t:
-                    file_name = f'{config["g2t"]["save"]}_best_ep{i}'
+                    file_name = f'{config["g2t"]["save"]}_best'
+                    logging.info(f'best model so far saved, epoch {i}')
                 else:
                     file_name = f'{config["g2t"]["save"]}_ep{i}'
                 best_g2t = max(best_g2t, e)

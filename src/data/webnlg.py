@@ -73,10 +73,10 @@ def pad(var_len_list, out_type="list", flatten=False):
 
 class Vocab:
     def __init__(
-            self,
-            max_vocab=2 ** 31,
-            min_freq=-1,
-            sp=["<PAD>", "<BOS>", "<EOS>", "<UNK>", "<ROOT>"],
+        self,
+        max_vocab=2 ** 31,
+        min_freq=-1,
+        sp=["<PAD>", "<BOS>", "<EOS>", "<UNK>", "<ROOT>"],
     ):
         self.i2s = []
         self.s2i = {}
@@ -116,9 +116,9 @@ class Vocab:
         sort_kv = sorted(self.wf.items(), key=lambda x: x[1], reverse=True)
         for k, v in sort_kv:
             if (
-                    len(self.i2s) < self.max_vocab
-                    and v >= self.min_freq
-                    and k not in self.sp
+                len(self.i2s) < self.max_vocab
+                and v >= self.min_freq
+                and k not in self.sp
             ):
                 self.i2s.append(k)
         self.s2i.update(list(zip(self.i2s, range(len(self.i2s)))))
@@ -228,7 +228,7 @@ class Example:
             vocab = self.vocab
             ret = {}
             ret["text"] = (
-                    [vocab["text"]("<BOS>")] + self.text + [vocab["text"]("<EOS>")]
+                [vocab["text"]("<BOS>")] + self.text + [vocab["text"]("<EOS>")]
             )
             ret["ent_text"] = [
                 [vocab["entity"]("<BOS>")] + x + [vocab["entity"]("<EOS>")]
@@ -284,19 +284,25 @@ def batch2tensor_t2g(datas, device, text_vocab, ent_vocab, tokenizer, add_inp=Fa
         st, ed = [], []
         cstr = ""
         ent_order = []
-        for i, t in enumerate(data["text"]):  # t: token id of each word in the data["text"] sentence
+        for i, t in enumerate(
+            data["text"]
+        ):  # t: token id of each word in the data["text"] sentence
             if t >= len(text_vocab):
                 # if t is the id of an entity token ("ENT_0", ...):
                 #   - add the entity text to cstr (without '<BOS>', '<EOS>' tokens)
                 #   - add to st and ed the indices of start and end characters (in sentence cstr), for every entity
-                ff = (t - len(text_vocab)) not in ent_order  # t - len(text_vocab) = entity number
+                ff = (
+                    t - len(text_vocab)
+                ) not in ent_order  # t - len(text_vocab) = entity number
                 if ff:
                     st.append(len(cstr))
                 cstr += " ".join(
                     [x for x in text_vocab(t, ents) if x[0] != "<" and x[-1] != ">"]
                 )
                 if ff:
-                    ent_order.append(t - len(text_vocab))  # register entities in the order they appear
+                    ent_order.append(
+                        t - len(text_vocab)
+                    )  # register entities in the order they appear
                     ed.append(len(cstr))
             else:
                 if text_vocab(t)[0] == "<":
@@ -330,7 +336,9 @@ def batch2tensor_t2g(datas, device, text_vocab, ent_vocab, tokenizer, add_inp=Fa
         # order of entity number (ENT_0, ENT_1, etc) instead of the order they appear in the sentence
         _order_ent_pos = []
         for _e in range(len(ents)):
-            if _e in ent_order:  # ent_order = [1, 0, 2] if text = "ENT_1 blabla ENT_0 blabla ENT_2"
+            if (
+                _e in ent_order
+            ):  # ent_order = [1, 0, 2] if text = "ENT_1 blabla ENT_0 blabla ENT_2"
                 idx = ent_order.index(_e)
                 _order_ent_pos.append(_ent_pos[idx])
             else:
@@ -339,7 +347,9 @@ def batch2tensor_t2g(datas, device, text_vocab, ent_vocab, tokenizer, add_inp=Fa
 
         ent_pos.append(_order_ent_pos)
         text.append(tokenizer.convert_tokens_to_ids(tok_abs))
-        _tgt = torch.zeros(MAX_ENT, MAX_ENT)  # 0: <PAD> (in all vocabs, including vocab["relation"])
+        _tgt = torch.zeros(
+            MAX_ENT, MAX_ENT
+        )  # 0: <PAD> (in all vocabs, including vocab["relation"])
         _tgt[: len(_ent_pos), : len(_ent_pos)] += 3  # 3: <UNK>
         for _e1, _r, _e2 in data["raw_relation"]:
             if (
@@ -360,9 +370,22 @@ def batch2tensor_t2g(datas, device, text_vocab, ent_vocab, tokenizer, add_inp=Fa
 
 
 def write_txt(batch, seqs, text_vocab):
-    # converting the prediction to real text.
+    """
+
+    Convert the prediction to real text.
+
+    Args:
+        batch: g2t_batch
+        seqs: (bs, max_sent_len) tensor of predicted tokens (words+entities)
+        text_vocab:
+
+    Returns:
+        List of predictions as plain text, shape: (bs, 1)
+
+    """
+
     ret = []
-    for b, seq in enumerate(seqs):
+    for b, seq in enumerate(seqs):  # b: index of seq in the batch
         txt = []
 
         for token in seq:
@@ -388,6 +411,7 @@ def write_txt(batch, seqs, text_vocab):
             [" ".join([str(x) for x in txt]).replace("<BOS>", "").replace("<EOS>", "")]
         )
     return ret
+
 
 class WebNLGDataset(Dataset):
     def __init__(self, file_path: Path):

@@ -1,8 +1,13 @@
+from collections import defaultdict
 from typing import List
 
 import numpy as np
 import torch
 import torchmetrics
+from pycocoevalcap.bleu.bleu import Bleu
+from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
 from pytorch_lightning import LightningModule
 from torch import nn
 from transformers import get_cosine_schedule_with_warmup
@@ -80,6 +85,32 @@ class CycleCVAE(LightningModule):
             relation_types=len(rel_vocab), d_model=dim_h, dropout=t2g_drop
         )
 
+    def configure_optimizers(self):
+        g2t_optimizer = torch.optim.Adam(
+            self.g2t_model.parameters(),
+            lr=self.g2t_lr,
+            weight_decay=self.g2t_weight_decay,
+        )
+        t2g_optimizer = torch.optim.Adam(
+            self.t2g_model.parameters(),
+            lr=self.t2g_lr,
+            weight_decay=self.t2g_weight_decay,
+        )
+
+        # learning rate schedulers
+        g2t_scheduler = get_cosine_schedule_with_warmup(
+            optimizer=g2t_optimizer,
+            num_warmup_steps=400,
+            num_training_steps=800 * self.tot_epoch,
+        )
+        t2g_scheduler = get_cosine_schedule_with_warmup(
+            optimizer=t2g_optimizer,
+            num_warmup_steps=400,
+            num_training_steps=800 * self.tot_epoch,
+        )
+
+        return (t2g_optimizer, g2t_optimizer), (t2g_scheduler, g2t_scheduler)
+
     def forward(self, *args, **kwargs):
         pass
 
@@ -137,38 +168,75 @@ class CycleCVAE(LightningModule):
             prog_bar=True,
         )
 
-    def write_t2g_log(self, rel_pred: np.array, ents: List[str]):
-        """
-        Write a predicted graph as plain text to the logging file
-
-        Args:
-            rel_pred: numpy array of shape (max_num_ent, max_num_ent).
-                Contains the indices of predicted relations between entities.
-            ents: list of entities as plain text, for this example
-
-        """
-        rels = []
-        for e1 in range(len(ents)):
-            for e2 in range(len(ents)):
-                # 0: padding, 3: unknown
-                if rel_pred[e1, e2] != 3 and rel_pred[e1, e2] != 0:
-                    rels.append((e1, int(rel_pred[e1, e2]), e2))
-        self.wf.write(
-            str([(ents[e1], self.rel_vocab(r), ents[e2]) for e1, r, e2 in rels])
-            + "\n"
-        )
-
     def on_validation_epoch_start(self) -> None:
         # should be what we want, compared to on_validation_start
         # https://github.com/PyTorchLightning/pytorch-lightning/issues/2816
         self.wf = open("t2g_out.txt", "w", encoding="utf-8")
-        self.wf_g2t = open("g2t_out.txt", "w", encoding="utf-8")
+        self.g2t_hyp = []
+        self.g2t_ref = []
+        self.g2t_same = []
 
     def on_validation_epoch_end(self, outputs) -> None:
         self.wf.close()
-        self.logger.experiment.log_artifact("t2g_out.txt", f"t2g_out/{self.current_epoch}")
-        self.wf_g2t.close()
-        self.logger.experiment.log_artifact("g2t_out.txt", f"g2t_out/{self.current_epoch}")
+        self.logger.experiment.log_artifact(
+            "t2g_out.txt", f"t2g_out/{self.current_epoch}"
+        )
+
+        # g2t
+        self.log_dict(
+            {
+                "f1_micro": self.f1_micro.compute(),
+                "f1_macro": self.f1_macro.compute(),
+            }
+        )
+        # format predictions into text
+        unq_hyp = {}
+        unq_ref = defaultdict(list)
+        self.g2t_hyp = [x[0] for x in self.g2t_hyp]
+        self.g2t_ref = [x[0] for x in self.g2t_ref]
+        idxs, self.g2t_same = list(
+            zip(*sorted(enumerate(self.g2t_same), key=lambda x: x[1]))
+        )
+        ptr = 0
+        for i in range(len(self.g2t_hyp)):
+            if i > 0 and self.g2t_same[i] != self.g2t_same[i - 1]:
+                ptr += 1
+            unq_hyp[ptr] = self.g2t_hyp[idxs[i]]
+            unq_ref[ptr].append(self.g2t_ref[idxs[i]])
+        max_len = max([len(self.g2t_ref) for self.g2t_ref in unq_ref.values()])
+        unq_hyp = sorted(unq_hyp.items(), key=lambda x: x[0])
+        unq_ref = sorted(unq_ref.items(), key=lambda x: x[0])
+        self.g2t_hyp = [x[1] for x in unq_hyp]
+        self.g2t_ref = [[x.lower() for x in y[1]] for y in unq_ref]
+        # log predictions
+        with open("g2t_out.txt", "w", encoding="utf-8") as wf_h:
+            for i, h in enumerate(self.g2t_hyp):
+                wf_h.write(str(h) + "\n")
+        self.logger.experiment.log_artifact(
+            "g2t_out.txt", f"g2t_out/{self.current_epoch}"
+        )
+        # compute NLG metrics
+        g2t_hyp = dict(
+            zip(range(len(self.g2t_hyp)), [[x.lower()] for x in self.g2t_hyp])
+        )
+        g2t_ref = dict(zip(range(len(self.g2t_ref)), self.g2t_ref))
+        bleu = Bleu(4)
+        meteor = Meteor()
+        rouge = Rouge()
+        cider = Cider()
+        bleu_score = bleu.compute_score(g2t_ref, g2t_hyp)
+        self.log_dict(
+            {
+                "BLEU INP": len(g2t_hyp),
+                "BLEU 1": bleu_score[0][0],
+                "BLEU 2": bleu_score[0][1],
+                "BLEU 3": bleu_score[0][2],
+                "BLEU 4": bleu_score[0][3],
+                "METEOR": meteor.compute_score(g2t_ref, g2t_hyp)[0],
+                "ROUGE_L": (rouge.compute_score(g2t_ref, g2t_hyp)[0]),
+                "Cider": cider.compute_score(g2t_ref, g2t_hyp)[0],
+            }
+        )
 
     def validation_step(self, batch, batch_idx):
         batch_t2g = batch2tensor_t2g(
@@ -206,64 +274,38 @@ class CycleCVAE(LightningModule):
         f1_macro = self.f1_macro(pred, target)
 
         # g2t
-        seq = self.g2t_model(batch_g2t, beam_size=self.beam_size)
+        seq = self.g2t_model(batch_g2t, beam_size=self.beam_size)  # (bs, max_sent_len)
         r = write_txt(batch, batch["tgt"], self.text_vocab)
         h = write_txt(batch, seq, self.text_vocab)
-        _same.extend([str(x["raw_relation"]) + str(x["ent_text"]) for x in batch])
-        hyp.extend(h)
-        ref.extend(r)
+        self.g2t_same.extend(
+            [str(x["raw_relation"]) + str(x["ent_text"]) for x in batch]
+        )
+        # save text predictions for evaluation and logging at the end of val epoch
+        self.g2t_hyp.extend(h)
+        self.g2t_ref.extend(r)
 
-        # todo: move this code (which computes bleu for the whole batch) to epoch_end
-        hyp = [x[0] for x in hyp]
-        ref = [x[0] for x in ref]
-        idxs, _same = list(zip(*sorted(enumerate(_same), key=lambda x: x[1])))
-        ptr = 0
-        for i in range(len(hyp)):
-            if i > 0 and _same[i] != _same[i - 1]:
-                ptr += 1
-            unq_hyp[ptr] = hyp[idxs[i]]
-            unq_ref[ptr].append(ref[idxs[i]])
-        max_len = max([len(ref) for ref in unq_ref.values()])
-        unq_hyp = sorted(unq_hyp.items(), key=lambda x: x[0])
-        unq_ref = sorted(unq_ref.items(), key=lambda x: x[0])
-        hyp = [x[1] for x in unq_hyp]
-        ref = [[x.lower() for x in y[1]] for y in unq_ref]
-        wf_h = open("hyp.txt", "w", encoding="utf-8")
-        for i, h in enumerate(hyp):
-            wf_h.write(str(h) + "\n")
-        wf_h.close()
-        hyp = dict(zip(range(len(hyp)), [[x.lower()] for x in hyp]))
-        ref = dict(zip(range(len(ref)), ref))
-        ret = bleu.compute_score(ref, hyp)
-
-        # by default, these metrics will be computed and logged for the whole dataset (epoch end)
-        self.log_dict({"f1_micro": f1_micro, "f1_macro": f1_macro})
+        # log step-wise metrics
+        self.log_dict({"f1_micro_step": f1_micro, "f1_macro_step": f1_macro})
 
     def test_step(self, *args, **kwargs):
         pass
 
-    def configure_optimizers(self):
-        g2t_optimizer = torch.optim.Adam(
-            self.g2t_model.parameters(),
-            lr=self.g2t_lr,
-            weight_decay=self.g2t_weight_decay,
-        )
-        t2g_optimizer = torch.optim.Adam(
-            self.t2g_model.parameters(),
-            lr=self.t2g_lr,
-            weight_decay=self.t2g_weight_decay,
-        )
+    def write_t2g_log(self, rel_pred: np.array, ents: List[str]):
+        """
+        Write a predicted graph as plain text to the logging file
 
-        # learning rate schedulers
-        g2t_scheduler = get_cosine_schedule_with_warmup(
-            optimizer=g2t_optimizer,
-            num_warmup_steps=400,
-            num_training_steps=800 * self.tot_epoch,
-        )
-        t2g_scheduler = get_cosine_schedule_with_warmup(
-            optimizer=t2g_optimizer,
-            num_warmup_steps=400,
-            num_training_steps=800 * self.tot_epoch,
-        )
+        Args:
+            rel_pred: numpy array of shape (max_num_ent, max_num_ent).
+                Contains the indices of predicted relations between entities.
+            ents: list of entities as plain text, for this example
 
-        return (t2g_optimizer, g2t_optimizer), (t2g_scheduler, g2t_scheduler)
+        """
+        rels = []
+        for e1 in range(len(ents)):
+            for e2 in range(len(ents)):
+                # 0: padding, 3: unknown
+                if rel_pred[e1, e2] != 3 and rel_pred[e1, e2] != 0:
+                    rels.append((e1, int(rel_pred[e1, e2]), e2))
+        self.wf.write(
+            str([(ents[e1], self.rel_vocab(r), ents[e2]) for e1, r, e2 in rels]) + "\n"
+        )
