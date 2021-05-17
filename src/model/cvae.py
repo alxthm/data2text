@@ -113,7 +113,7 @@ class CycleCVAE(LightningModule):
             num_training_steps=800 * self.tot_epoch,
         )
 
-        return (t2g_optimizer, g2t_optimizer), (t2g_scheduler, g2t_scheduler)
+        return [t2g_optimizer, g2t_optimizer], [t2g_scheduler, g2t_scheduler]
 
     def forward(self, *args, **kwargs):
         pass

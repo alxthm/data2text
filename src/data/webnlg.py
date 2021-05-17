@@ -160,11 +160,13 @@ def get_graph(ent_len, rel_len, adj_edges):
     graph = dgl.DGLGraph()
 
     # add one node for each entity
-    graph.add_nodes(ent_len, {"type": torch.ones(ent_len) * NodeType.ENTITY})
+    graph.add_nodes(ent_len, {"type": torch.ones(ent_len) * NodeType.ENTITY.value})
     # add 1 root node
-    graph.add_nodes(1, {"type": torch.ones(1) * NodeType.ROOT})
+    graph.add_nodes(1, {"type": torch.ones(1) * NodeType.ROOT.value})
     # add one node for each relation
-    graph.add_nodes(rel_len * 2, {"type": torch.ones(rel_len * 2) * NodeType.RELATION})
+    graph.add_nodes(
+        rel_len * 2, {"type": torch.ones(rel_len * 2) * NodeType.RELATION.value}
+    )
 
     # add a bidirectional relation between the root node and all entities
     graph.add_edges(ent_len, torch.arange(ent_len))
@@ -454,6 +456,7 @@ class WebNLGDataModule(LightningDataModule):
 
         """
         if not os.path.isfile(self.data_dir / "processed/webnlg/train.data"):
+            os.makedirs(self.data_dir / "processed/webnlg", exist_ok=True)
             # load raw data files
             with open(self.data_dir / "raw/webnlg/train.json", "r") as f:
                 train_raw = json.load(f)

@@ -212,14 +212,16 @@ class GraphTrans(nn.Module):
                 feats = self.gat[i](graphs, feats)
         g_root = feats.index_select(
             0,
-            graphs.filter_nodes(lambda x: x.data["type"] == NodeType.ROOT).to(device),
+            graphs.filter_nodes(lambda x: x.data["type"] == NodeType.ROOT.value).to(
+                device
+            ),
         )
         g_ent = pad(
             feats.index_select(
                 0,
-                graphs.filter_nodes(lambda x: x.data["type"] == NodeType.ENTITY).to(
-                    device
-                ),
+                graphs.filter_nodes(
+                    lambda x: x.data["type"] == NodeType.ENTITY.value
+                ).to(device),
             ).split(ent_len),
             out_type="tensor",
         )
@@ -356,7 +358,6 @@ class G2T(nn.Module):
             the predicted token indices using greedy/beam search decoding
 
         """
-
 
         # (bs, max_num_ent) bool tensor, with max_num_ent/rel the max nb of ent/rel in the batch sentences
         # False if entity j exists in sentence i (i.e. if j < num_ent_i)

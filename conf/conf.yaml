@@ -4,13 +4,13 @@ grad_clip: 1.0 # gradient clipping
 batch_size: 32
 dim_h: 512
 dim_z: 10
-#mode: "cold_unsup" #['sup', 'cold_unsup', 'warm_unsup']
+mode: "sup"  # 'sup' or 'unsup'
 
 g2t:
     enc_lstm_layers: 2
     n_head: 4 # number of attention heads
     head_dim: 128 # dim of each attention head
-    emb_drop: 0.0
+    emb_dropout: 0.0
     attn_drop: 0.1
     drop: 0.1 # FFN dropout
     n_layers_gat: 2 # number of layers of GAT
