@@ -22,55 +22,6 @@ class NodeType(Enum):
     RELATION = 2
 
 
-def pad(var_len_list, out_type="list", flatten=False):
-    # padding sequences
-    if flatten:
-        lens = [len(x) for x in var_len_list]
-        var_len_list = sum(var_len_list, [])
-    max_len = max([len(x) for x in var_len_list])
-    if out_type == "list":
-        if flatten:
-            return [x + ["<PAD>"] * (max_len - len(x)) for x in var_len_list], lens
-        else:
-            return [x + ["<PAD>"] * (max_len - len(x)) for x in var_len_list]
-    if out_type == "tensor":
-        if flatten:
-            return (
-                torch.stack(
-                    [
-                        torch.cat(
-                            [
-                                x,
-                                torch.zeros(
-                                    [max_len - len(x)] + list(x.shape[1:])
-                                ).type_as(x),
-                            ],
-                            0,
-                        )
-                        for x in var_len_list
-                    ],
-                    0,
-                ),
-                lens,
-            )
-        else:
-            return torch.stack(
-                [
-                    torch.cat(
-                        [
-                            x,
-                            torch.zeros([max_len - len(x)] + list(x.shape[1:])).type_as(
-                                x
-                            ),
-                        ],
-                        0,
-                    )
-                    for x in var_len_list
-                ],
-                0,
-            )
-
-
 class Vocab:
     def __init__(
         self,
@@ -140,66 +91,6 @@ class Vocab:
             return self.s2i.get(x, self.s2i["<UNK>"])
 
 
-def scan_data(datas, vocab=None, is_test=False):
-    MF = -1
-
-    if vocab is None:
-        vocab = {
-            "text": Vocab(min_freq=MF),
-            "entity": Vocab(min_freq=MF),
-            "relation": Vocab(),
-        }
-    for data in datas:
-        vocab["text"].update(data["text"].split(), is_test=is_test)
-        vocab["entity"].update(sum(data["entities"], []), is_test=is_test)
-        vocab["relation"].update([x[1] for x in data["relations"]], inv=True)
-    return vocab
-
-
-def get_graph(ent_len, rel_len, adj_edges):
-    graph = dgl.DGLGraph()
-
-    # add one node for each entity
-    graph.add_nodes(ent_len, {"type": torch.ones(ent_len) * NodeType.ENTITY.value})
-    # add 1 root node
-    graph.add_nodes(1, {"type": torch.ones(1) * NodeType.ROOT.value})
-    # add one node for each relation
-    graph.add_nodes(
-        rel_len * 2, {"type": torch.ones(rel_len * 2) * NodeType.RELATION.value}
-    )
-
-    # add a bidirectional relation between the root node and all entities
-    graph.add_edges(ent_len, torch.arange(ent_len))
-    graph.add_edges(torch.arange(ent_len), ent_len)
-    # add a relation for each node to itself
-    graph.add_edges(
-        torch.arange(ent_len + 1 + rel_len * 2), torch.arange(ent_len + 1 + rel_len * 2)
-    )
-    if len(adj_edges) > 0:
-        # for each relation in adj_edges [i, j] (between entity i and j), add relation to the graph
-        graph.add_edges(*list(map(list, zip(*adj_edges))))
-    return graph
-
-
-def build_graph(ent_len, relations):
-    rel_len = len(relations)
-
-    adj_edges = []
-    for i, r in enumerate(relations):
-        # for each entities A,B with relation r, add relations
-        # [(A,u), (u,B), (B,v), (v,A)]
-        # with u, v the two graph nodes that represent relation r
-        st_ent, rt, ed_ent = r
-        # according to the edge_softmax operator, we need to reverse the graph
-        adj_edges.append([ent_len + 1 + 2 * i, st_ent])
-        adj_edges.append([ed_ent, ent_len + 1 + 2 * i])
-        adj_edges.append([ent_len + 1 + 2 * i + 1, ed_ent])
-        adj_edges.append([st_ent, ent_len + 1 + 2 * i + 1])
-
-    graph = get_graph(ent_len, rel_len, adj_edges)
-    return graph
-
-
 class Example:
     def __init__(self, data, vocab):
         self.uuid = uuid.uuid4()
@@ -247,172 +138,155 @@ class Example:
             return self._cached_tensor
 
 
-def batch2tensor_g2t(datas, device, ent_vocab):
-    # raw batch to tensor
-    ret = {}
-    ret["ent_len"] = [len(x["ent_text"]) for x in datas]
-    # list of length bs, with list of sentence entities tokenized
-    # (bs, num_ent_i, ent_len_ij)
-    ents = [ent_vocab(x["ent_text"]) for x in datas]
-    ret["raw_ent_text"] = ents
-    # (bs, max_sentence_len)
-    ret["text"] = pad([torch.LongTensor(x["text"]) for x in datas], "tensor").to(device)
-    # (bs, max_sentence_len - 1)
-    ret["tgt"] = ret["text"][:, 1:]
-    ret["text"] = ret["text"][:, :-1]
-    # flattened list of entity token indices tensors
-    # (size sum(num_ent_i), for every batch element and for every entity entity in the sentence)
-    ent_text = sum([[torch.LongTensor(y) for y in x["ent_text"]] for x in datas], [])
-    # size (sum(num_ent_i), max_entity_len)
-    ret["ent_text"] = pad(ent_text, "tensor").to(device)
-    # size (bs, max_num_rel)
-    ret["rel"] = pad([torch.LongTensor(x["relation"]) for x in datas], "tensor").to(
-        device
-    )
-    ret["graph"] = dgl.batch([x["graph"] for x in datas]).to(device)
-    return ret
+class Collator:
+    def __init__(self, ent_vocab: Vocab, text_vocab: Vocab, tokenizer):
+        self.ent_vocab = ent_vocab
+        self.text_vocab = text_vocab
+        self.tokenizer = tokenizer
+        # todo: remove, maybe not needed if conversion to GPU outside after collate fn
+        self.device = torch.device("cpu")
 
+    def __call__(self, batch: List):
+        ret = {}
+        # original raw batch (needed for logging)
+        ret["original_ent_text"] = [x["ent_text"] for x in batch]
+        ret["original_raw_relation"] = [x["raw_relation"] for x in batch]
 
-def batch2tensor_t2g(datas, device, text_vocab, ent_vocab, tokenizer, add_inp=False):
-    # raw batch to tensor, we use the Bert tokenizer for the T2G model
-    ret = {}
-    ent_pos = []
-    text = []
-    tgt = []
-    MAX_ENT = 100
-    ent_len = 1
-    for data in datas:
-        ents = [ent_vocab(x) for x in data["ent_text"]]
-        st, ed = [], []
-        cstr = ""
-        ent_order = []
-        for i, t in enumerate(
-            data["text"]
-        ):  # t: token id of each word in the data["text"] sentence
-            if t >= len(text_vocab):
-                # if t is the id of an entity token ("ENT_0", ...):
-                #   - add the entity text to cstr (without '<BOS>', '<EOS>' tokens)
-                #   - add to st and ed the indices of start and end characters (in sentence cstr), for every entity
-                ff = (
-                    t - len(text_vocab)
-                ) not in ent_order  # t - len(text_vocab) = entity number
-                if ff:
-                    st.append(len(cstr))
-                cstr += " ".join(
-                    [x for x in text_vocab(t, ents) if x[0] != "<" and x[-1] != ">"]
-                )
-                if ff:
-                    ent_order.append(
-                        t - len(text_vocab)
-                    )  # register entities in the order they appear
-                    ed.append(len(cstr))
-            else:
-                if text_vocab(t)[0] == "<":
-                    continue
-                cstr += text_vocab(t)
-            cstr += "" if i == len(data["text"]) - 1 else " "
-        if add_inp:
-            cstr += " " + " ".join([" ".join(e) for e in ents])
-        tok_abs = ["[CLS]"] + tokenizer.tokenize(cstr) + ["[SEP]"]
-        _ent_pos = []
-        for s, e in zip(st, ed):
-            # from start/end indices of entities (s,e) in cstr, find new_s, new_e the start/end indices
-            # of entities in tok_abs, the tokenized version of cstr
-            guess_start = s - cstr[:s].count(" ") + 5  # ??
-            guess_end = e - cstr[:e].count(" ") + 5
-
-            new_s = -1
-            new_e = -1
-            l = 0
-            r = 0
-            for i in range(len(tok_abs)):
-                # l, r: start/end indices of the text representation of tok_abs[i] in cstr
-                l = r
-                r = l + len(tok_abs[i]) - tok_abs[i].count("##") * 2
-                if l <= guess_start and guess_start < r:
-                    new_s = i
-                if l <= guess_end and guess_end < r:
-                    new_e = i
-            _ent_pos.append((new_s, new_e))
-        # order the list _ent_pos (start/end indices of every entity in tok_abs) so they are in the
-        # order of entity number (ENT_0, ENT_1, etc) instead of the order they appear in the sentence
-        _order_ent_pos = []
-        for _e in range(len(ents)):
-            if (
-                _e in ent_order
-            ):  # ent_order = [1, 0, 2] if text = "ENT_1 blabla ENT_0 blabla ENT_2"
-                idx = ent_order.index(_e)
-                _order_ent_pos.append(_ent_pos[idx])
-            else:
-                idx = 0
-                _order_ent_pos.append((0, 1))
-
-        ent_pos.append(_order_ent_pos)
-        text.append(tokenizer.convert_tokens_to_ids(tok_abs))
-        _tgt = torch.zeros(
-            MAX_ENT, MAX_ENT
-        )  # 0: <PAD> (in all vocabs, including vocab["relation"])
-        _tgt[: len(_ent_pos), : len(_ent_pos)] += 3  # 3: <UNK>
-        for _e1, _r, _e2 in data["raw_relation"]:
-            if (
-                _e1 not in ent_order or _e2 not in ent_order
-            ):  # the synthetic data may lose some entities
-                continue
-            _tgt[_e1, _e2] = _r
-        tgt.append(_tgt)
-        ent_len = max(ent_len, len(_order_ent_pos))
-    # indices of bert tokens for the full sentences (entities as plain text), padded
-    ret["sents"] = pad([torch.LongTensor(x) for x in text], "tensor").to(device)
-    # for every sentence of the batch, list of start/end indices for ENT_0, ENT_1, etc (in tokenized sentence)
-    ret["ents"] = ent_pos
-    # shape (batch_size, max_ent_len, max_ent_len) - indexes of relations between each entities i, j
-    # (0 if there is no ENT_i or ENT_j in the data sample, 3 if there is no relation between ENT_i and ENT_j)
-    ret["tgt"] = torch.stack(tgt, 0)[:, :ent_len, :ent_len].long().to(device)
-    return ret
-
-
-def write_txt(batch, seqs, text_vocab):
-    """
-
-    Convert the prediction to real text.
-
-    Args:
-        batch: g2t_batch
-        seqs: (bs, max_sent_len) tensor of predicted tokens (words+entities)
-        text_vocab:
-
-    Returns:
-        List of predictions as plain text, shape: (bs, 1)
-
-    """
-
-    ret = []
-    for b, seq in enumerate(seqs):  # b: index of seq in the batch
-        txt = []
-
-        for token in seq:
-            # copy the entity
-            if token >= len(text_vocab):
-                if (token - len(text_vocab)) >= len(batch["raw_ent_text"][b]):
-                    print((token - len(text_vocab)), len(batch["raw_ent_text"][b]))
-                    tok = ["NO_ENT"]
-                else:
-                    tok = batch["raw_ent_text"][b][token - len(text_vocab)]
-                    # tok = ['ENT_'+str(int(token-len(text_vocab)))+'_ENT']
-                ent_text = tok
-                ent_text = filter(lambda x: x != "<PAD>", ent_text)
-                txt.extend(ent_text)
-            else:
-                if int(token) not in [
-                    text_vocab(x) for x in ["<PAD>", "<BOS>", "<EOS>"]
-                ]:
-                    txt.append(text_vocab(int(token)))
-            if int(token) == text_vocab("<EOS>"):
-                break
-        ret.append(
-            [" ".join([str(x) for x in txt]).replace("<BOS>", "").replace("<EOS>", "")]
+        # g2t batch
+        ret["g2t_ent_len"] = [len(x["ent_text"]) for x in batch]
+        # list of length bs, with list of sentence entities tokenized
+        # (bs, num_ent_i, ent_len_ij)
+        ents = [self.ent_vocab(x["ent_text"]) for x in batch]
+        ret["g2t_raw_ent_text"] = ents
+        # (bs, max_sentence_len)
+        ret["g2t_text"] = pad(
+            [torch.LongTensor(x["text"]) for x in batch], "tensor"
+        ).to(self.device)
+        # (bs, max_sentence_len - 1)
+        ret["g2t_tgt"] = ret["g2t_text"][:, 1:]
+        ret["g2t_text"] = ret["g2t_text"][:, :-1]
+        # flattened list of entity token indices tensors
+        # (size sum(num_ent_i), for every batch element and for every
+        #  entity in the sentence)
+        ent_text = sum(
+            [[torch.LongTensor(y) for y in x["ent_text"]] for x in batch], []
         )
-    return ret
+        # size (sum(num_ent_i), max_entity_len)
+        ret["g2t_ent_text"] = pad(ent_text, "tensor").to(self.device)
+        # size (bs, max_num_rel)
+        ret["g2t_rel"] = pad(
+            [torch.LongTensor(x["relation"]) for x in batch], "tensor"
+        ).to(self.device)
+        ret["g2t_graph"] = dgl.batch([x["graph"] for x in batch]).to(self.device)
+
+        # t2g batch
+        ent_pos = []
+        text = []
+        tgt = []
+        MAX_ENT = 100
+        ent_len = 1
+        for data in batch:
+            ents = [self.ent_vocab(x) for x in data["ent_text"]]
+            st, ed = [], []
+            cstr = ""
+            ent_order = []
+            for i, t in enumerate(
+                data["text"]
+            ):  # t: token id of each word in the data["text"] sentence
+                if t >= len(self.text_vocab):
+                    # if t is the id of an entity token ("ENT_0", ...):
+                    #   - add the entity text to cstr (without '<BOS>', '<EOS>' tokens)
+                    #   - add to st and ed the indices of start and end characters
+                    #       (in sentence cstr), for every entity
+                    ff = (
+                        t - len(self.text_vocab)
+                    ) not in ent_order  # t - len(self.text_vocab) = entity number
+                    if ff:
+                        st.append(len(cstr))
+                    cstr += " ".join(
+                        [
+                            x
+                            for x in self.text_vocab(t, ents)
+                            if x[0] != "<" and x[-1] != ">"
+                        ]
+                    )
+                    if ff:
+                        ent_order.append(
+                            t - len(self.text_vocab)
+                        )  # register entities in the order they appear
+                        ed.append(len(cstr))
+                else:
+                    if self.text_vocab(t)[0] == "<":
+                        continue
+                    cstr += self.text_vocab(t)
+                cstr += "" if i == len(data["text"]) - 1 else " "
+            # never used?
+            # if add_inp:
+            #     cstr += " " + " ".join([" ".join(e) for e in ents])
+            tok_abs = ["[CLS]"] + self.tokenizer.tokenize(cstr) + ["[SEP]"]
+            _ent_pos = []
+            for s, e in zip(st, ed):
+                # from start/end indices of entities (s,e) in cstr, find new_s, new_e
+                # the start/end indices of entities in tok_abs, the tokenized version of cstr
+                guess_start = s - cstr[:s].count(" ") + 5  # ??
+                guess_end = e - cstr[:e].count(" ") + 5
+
+                new_s = -1
+                new_e = -1
+                l = 0
+                r = 0
+                for i in range(len(tok_abs)):
+                    # l, r: start/end indices of the text representation of tok_abs[i] in cstr
+                    l = r
+                    r = l + len(tok_abs[i]) - tok_abs[i].count("##") * 2
+                    if l <= guess_start and guess_start < r:
+                        new_s = i
+                    if l <= guess_end and guess_end < r:
+                        new_e = i
+                _ent_pos.append((new_s, new_e))
+            # order the list _ent_pos (start/end indices of every entity in tok_abs)
+            # so they are in the order of entity number (ENT_0, ENT_1, etc)
+            # instead of the order they appear in the sentence
+            _order_ent_pos = []
+            for _e in range(len(ents)):
+                if (
+                    _e in ent_order
+                ):  # ent_order = [1, 0, 2] if text = "ENT_1 blabla ENT_0 blabla ENT_2"
+                    idx = ent_order.index(_e)
+                    _order_ent_pos.append(_ent_pos[idx])
+                else:
+                    idx = 0
+                    _order_ent_pos.append((0, 1))
+
+            ent_pos.append(_order_ent_pos)
+            text.append(self.tokenizer.convert_tokens_to_ids(tok_abs))
+            _tgt = torch.zeros(
+                MAX_ENT, MAX_ENT
+            )  # 0: <PAD> (in all vocabs, including vocab["relation"])
+            _tgt[: len(_ent_pos), : len(_ent_pos)] += 3  # 3: <UNK>
+            for _e1, _r, _e2 in data["raw_relation"]:
+                if (
+                    _e1 not in ent_order or _e2 not in ent_order
+                ):  # the synthetic data may lose some entities
+                    continue
+                _tgt[_e1, _e2] = _r
+            tgt.append(_tgt)
+            ent_len = max(ent_len, len(_order_ent_pos))
+        # indices of bert tokens for the full sentences (entities as plain text), padded
+        ret["t2g_sents"] = pad([torch.LongTensor(x) for x in text], "tensor").to(
+            self.device
+        )
+        # for every sentence of the batch, list of start/end indices for ENT_0, ENT_1, etc
+        # (in tokenized sentence)
+        ret["t2g_ents"] = ent_pos
+        # shape (batch_size, max_ent_len, max_ent_len) - indexes of relations between
+        # each entities i, j
+        # (0 if there is no ENT_i or ENT_j in the data sample, 3 if there is no relation
+        # between ENT_i and ENT_j)
+        ret["t2g_tgt"] = (
+            torch.stack(tgt, 0)[:, :ent_len, :ent_len].long().to(self.device)
+        )
+        return ret
 
 
 class WebNLGDataset(Dataset):
@@ -513,12 +387,179 @@ class WebNLGDataModule(LightningDataModule):
         self.text_vocab = vocab["text"]
         self.ent_vocab = vocab["entity"]
         self.rel_vocab = vocab["relation"]
+        self.collate_fn = Collator(
+            ent_vocab=self.ent_vocab,
+            text_vocab=self.text_vocab,
+            tokenizer=self.tokenizer,
+        )
 
     def train_dataloader(self) -> Any:
-        return DataLoader(self.dataset_train, self.batch_size)
+        return DataLoader(
+            self.dataset_train, self.batch_size, collate_fn=self.collate_fn
+        )
 
     def val_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
-        return DataLoader(self.dataset_val, self.batch_size, shuffle=False)
+        return DataLoader(
+            self.dataset_val, self.batch_size, shuffle=False, collate_fn=self.collate_fn
+        )
 
     def test_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
-        return DataLoader(self.dataset_test, self.batch_size, shuffle=False)
+        return DataLoader(
+            self.dataset_test,
+            self.batch_size,
+            shuffle=False,
+            collate_fn=self.collate_fn,
+        )
+
+
+def write_txt(batch, seqs, text_vocab):
+    """
+
+    Convert the prediction to real text.
+
+    Args:
+        batch: g2t_batch
+        seqs: (bs, max_sent_len) tensor of predicted tokens (words+entities)
+        text_vocab:
+
+    Returns:
+        List of predictions as plain text, shape: (bs, 1)
+
+    """
+
+    ret = []
+    for b, seq in enumerate(seqs):  # b: index of seq in the batch
+        txt = []
+
+        for token in seq:
+            # copy the entity
+            if token >= len(text_vocab):
+                if (token - len(text_vocab)) >= len(batch["g2t_raw_ent_text"][b]):
+                    print((token - len(text_vocab)), len(batch["g2t_raw_ent_text"][b]))
+                    tok = ["NO_ENT"]
+                else:
+                    tok = batch["g2t_raw_ent_text"][b][token - len(text_vocab)]
+                    # tok = ['ENT_'+str(int(token-len(text_vocab)))+'_ENT']
+                ent_text = tok
+                ent_text = filter(lambda x: x != "<PAD>", ent_text)
+                txt.extend(ent_text)
+            else:
+                if int(token) not in [
+                    text_vocab(x) for x in ["<PAD>", "<BOS>", "<EOS>"]
+                ]:
+                    txt.append(text_vocab(int(token)))
+            if int(token) == text_vocab("<EOS>"):
+                break
+        ret.append(
+            [" ".join([str(x) for x in txt]).replace("<BOS>", "").replace("<EOS>", "")]
+        )
+    return ret
+
+
+def pad(var_len_list, out_type="list", flatten=False):
+    # padding sequences
+    if flatten:
+        lens = [len(x) for x in var_len_list]
+        var_len_list = sum(var_len_list, [])
+    max_len = max([len(x) for x in var_len_list])
+    if out_type == "list":
+        if flatten:
+            return [x + ["<PAD>"] * (max_len - len(x)) for x in var_len_list], lens
+        else:
+            return [x + ["<PAD>"] * (max_len - len(x)) for x in var_len_list]
+    if out_type == "tensor":
+        if flatten:
+            return (
+                torch.stack(
+                    [
+                        torch.cat(
+                            [
+                                x,
+                                torch.zeros(
+                                    [max_len - len(x)] + list(x.shape[1:])
+                                ).type_as(x),
+                            ],
+                            0,
+                        )
+                        for x in var_len_list
+                    ],
+                    0,
+                ),
+                lens,
+            )
+        else:
+            return torch.stack(
+                [
+                    torch.cat(
+                        [
+                            x,
+                            torch.zeros([max_len - len(x)] + list(x.shape[1:])).type_as(
+                                x
+                            ),
+                        ],
+                        0,
+                    )
+                    for x in var_len_list
+                ],
+                0,
+            )
+
+
+def scan_data(datas, vocab=None, is_test=False):
+    MF = -1
+
+    if vocab is None:
+        vocab = {
+            "text": Vocab(min_freq=MF),
+            "entity": Vocab(min_freq=MF),
+            "relation": Vocab(),
+        }
+    for data in datas:
+        vocab["text"].update(data["text"].split(), is_test=is_test)
+        vocab["entity"].update(sum(data["entities"], []), is_test=is_test)
+        vocab["relation"].update([x[1] for x in data["relations"]], inv=True)
+    return vocab
+
+
+def get_graph(ent_len, rel_len, adj_edges):
+    graph = dgl.DGLGraph()
+
+    # add one node for each entity
+    graph.add_nodes(ent_len, {"type": torch.ones(ent_len) * NodeType.ENTITY.value})
+    # add 1 root node
+    graph.add_nodes(1, {"type": torch.ones(1) * NodeType.ROOT.value})
+    # add one node for each relation
+    graph.add_nodes(
+        rel_len * 2, {"type": torch.ones(rel_len * 2) * NodeType.RELATION.value}
+    )
+
+    # add a bidirectional relation between the root node and all entities
+    graph.add_edges(ent_len, torch.arange(ent_len))
+    graph.add_edges(torch.arange(ent_len), ent_len)
+    # add a relation for each node to itself
+    graph.add_edges(
+        torch.arange(ent_len + 1 + rel_len * 2), torch.arange(ent_len + 1 + rel_len * 2)
+    )
+    if len(adj_edges) > 0:
+        # for each relation in adj_edges [i, j] (between entity i and j), add relation to the graph
+        graph.add_edges(*list(map(list, zip(*adj_edges))))
+    return graph
+
+
+def build_graph(ent_len, relations):
+    rel_len = len(relations)
+
+    adj_edges = []
+    for i, r in enumerate(relations):
+        # for each entities A,B with relation r, add relations
+        # [(A,u), (u,B), (B,v), (v,A)]
+        # with u, v the two graph nodes that represent relation r
+        st_ent, rt, ed_ent = r
+        # according to the edge_softmax operator, we need to reverse the graph
+        adj_edges.append([ent_len + 1 + 2 * i, st_ent])
+        adj_edges.append([ed_ent, ent_len + 1 + 2 * i])
+        adj_edges.append([ent_len + 1 + 2 * i + 1, ed_ent])
+        adj_edges.append([st_ent, ent_len + 1 + 2 * i + 1])
+
+    graph = get_graph(ent_len, rel_len, adj_edges)
+    return graph

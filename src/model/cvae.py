@@ -12,7 +12,7 @@ from pytorch_lightning import LightningModule
 from torch import nn
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
-from src.data.webnlg import Vocab, batch2tensor_t2g, batch2tensor_g2t, write_txt
+from src.data.webnlg import Vocab, write_txt
 from src.model.g2t import G2T
 from src.model.t2g import T2G
 
@@ -45,6 +45,8 @@ class CycleCVAE(LightningModule):
         gradient_clip_val: float,
     ):
         super().__init__()
+        self.automatic_optimization = False
+
         self.tokenizer = tokenizer
         self.tot_epoch = tot_epoch
         self.text_vocab = text_vocab
@@ -63,7 +65,10 @@ class CycleCVAE(LightningModule):
         max_w = max(t2g_weight)
         t2g_weight = np.array(t2g_weight).astype("float32")
         t2g_weight = (max_w + 1000) / (t2g_weight + 1000)
-        self.t2g_weight = torch.from_numpy(t2g_weight).float().to(self.device)
+        # pytorch buffers are saved in the model state_dict
+        # (but unlike parameters, they are not passed to the optimizer)
+        # and are automatically moved to correct device by pytorch lightning
+        self.register_buffer("t2g_weight", torch.from_numpy(t2g_weight).float())
 
         # todo: check this is the right number of classes
         self.f1_micro = torchmetrics.F1(num_classes=len(rel_vocab), average="micro")
@@ -123,16 +128,12 @@ class CycleCVAE(LightningModule):
 
         # --- SUPERVISED
         self.g2t_model.blind, self.t2g_model.blind = False, False  # not necessary
-        batch_t2g = batch2tensor_t2g(
-            batch, self.device, self.text_vocab, self.ent_vocab, self.tokenizer
-        )
-        batch_g2t = batch2tensor_g2t(batch, self.device, self.ent_vocab)
 
         # --- train t2g one step
-        pred = self.t2g_model(batch_t2g)  # pred (bs, ne, ne, num_relations)
+        pred = self.t2g_model(batch)  # pred (bs, ne, ne, num_relations)
         loss_t2g = F.nll_loss(
             pred.contiguous().view(-1, pred.shape[-1]),
-            batch_t2g["tgt"].contiguous().view(-1),  # initially shape (bs, ne, ne)
+            batch["t2g_tgt"].contiguous().view(-1),  # initially shape (bs, ne, ne)
             ignore_index=0,
             weight=self.t2g_weight,
         )
@@ -142,10 +143,10 @@ class CycleCVAE(LightningModule):
         t2g_opt.step()
 
         # --- train g2t one step
-        pred, _, kl_div = self.g2t_model(batch_g2t)
+        pred, _, kl_div = self.g2t_model(batch)
         recon_loss = F.nll_loss(
             pred.reshape(-1, pred.shape[-1]),
-            batch_g2t["tgt"].reshape(-1),
+            batch["g2t_tgt"].reshape(-1),
             ignore_index=0,
         )
         kl_anneal = min(1.0, (self.global_step + 100) / (self.global_step + 10000))
@@ -175,15 +176,15 @@ class CycleCVAE(LightningModule):
     def on_validation_epoch_start(self) -> None:
         # should be what we want, compared to on_validation_start
         # https://github.com/PyTorchLightning/pytorch-lightning/issues/2816
-        self.wf = open("t2g_out.txt", "w", encoding="utf-8")
+        self.wf = open("/tmp/t2g_out.txt", "w", encoding="utf-8")
         self.g2t_hyp = []
         self.g2t_ref = []
         self.g2t_same = []
 
-    def on_validation_epoch_end(self, outputs) -> None:
+    def on_validation_epoch_end(self) -> None:
         self.wf.close()
         self.logger.experiment.log_artifact(
-            "t2g_out.txt", f"t2g_out/{self.current_epoch}"
+            self.logger.run_id, "/tmp/t2g_out.txt", f"t2g_out/{self.current_epoch}"
         )
 
         # g2t
@@ -213,11 +214,11 @@ class CycleCVAE(LightningModule):
         self.g2t_hyp = [x[1] for x in unq_hyp]
         self.g2t_ref = [[x.lower() for x in y[1]] for y in unq_ref]
         # log predictions
-        with open("g2t_out.txt", "w", encoding="utf-8") as wf_h:
+        with open("/tmp/g2t_out.txt", "w", encoding="utf-8") as wf_h:
             for i, h in enumerate(self.g2t_hyp):
                 wf_h.write(str(h) + "\n")
         self.logger.experiment.log_artifact(
-            "g2t_out.txt", f"g2t_out/{self.current_epoch}"
+            self.logger.run_id, "/tmp/g2t_out.txt", f"g2t_out/{self.current_epoch}"
         )
         # compute NLG metrics
         g2t_hyp = dict(
@@ -243,22 +244,21 @@ class CycleCVAE(LightningModule):
         )
 
     def validation_step(self, batch, batch_idx):
-        batch_t2g = batch2tensor_t2g(
-            batch, self.device, self.text_vocab, self.ent_vocab, self.tokenizer
-        )
-        batch_g2t = batch2tensor_g2t(batch, self.device, self.ent_vocab)
+        batch_size = len(batch["original_ent_text"])
 
         # t2g
-        pred = self.t2g_model(batch_t2g)
+        pred = self.t2g_model(batch)
         _pred = pred.view(-1, pred.shape[-1]).argmax(-1).cpu().long().tolist()
-        _gold = batch_t2g["tgt"].view(-1).cpu().long().tolist()
+        _gold = batch["t2g_tgt"].view(-1).cpu().long().tolist()
         tpred = pred.argmax(-1).cpu().numpy()
-        tgold = batch_t2g["tgt"].cpu().numpy()
+        tgold = batch["t2g_tgt"].cpu().numpy()
+        # TODO: find a way with collated batch, instead of original batch (list of examples)
+        #   same for g2t
         # save predictions as plain text (todo: use custom callback)
-        for j in range(len(batch)):
+        for j in range(batch_size):
             ents = [
                 [y for y in self.ent_vocab(x) if y[0] != "<"]
-                for x in batch[j]["ent_text"]
+                for x in batch["original_ent_text"][j]
             ]
             self.wf.write("=====================\n")
             self.wf.write("--- Predictions\n")
@@ -272,17 +272,21 @@ class CycleCVAE(LightningModule):
                 # todo: simply use ignore_index of F1 metric?
                 pred.append(_pred[j])
                 gold.append(_gold[j])
-        pred = torch.Tensor(pred)
-        target = torch.Tensor(gold)
+        pred = torch.tensor(pred, dtype=torch.long, device=self.device)
+        target = torch.tensor(gold, dtype=torch.long, device=self.device)
         f1_micro = self.f1_micro(pred, target)
         f1_macro = self.f1_macro(pred, target)
 
         # g2t
-        seq = self.g2t_model(batch_g2t, beam_size=self.beam_size)  # (bs, max_sent_len)
-        r = write_txt(batch, batch["tgt"], self.text_vocab)
+        seq = self.g2t_model(batch, beam_size=self.beam_size)  # (bs, max_sent_len)
+        r = write_txt(batch, batch["g2t_tgt"], self.text_vocab)
         h = write_txt(batch, seq, self.text_vocab)
         self.g2t_same.extend(
-            [str(x["raw_relation"]) + str(x["ent_text"]) for x in batch]
+            [
+                str(batch["original_raw_relation"][i])
+                + str(batch["original_ent_text"][i])
+                for i in range(batch_size)
+            ]
         )
         # save text predictions for evaluation and logging at the end of val epoch
         self.g2t_hyp.extend(h)

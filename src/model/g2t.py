@@ -55,15 +55,13 @@ class MSA(nn.Module):
         if mode != "copy":
             self.WK = nn.Linear(kninp, n_head * head_dim, bias=False)
             self.WV = nn.Linear(kninp, n_head * head_dim, bias=False)
-        self.n_head, self.head_dim, self.mode = (
-            n_head,
-            head_dim,
-            mode,
-        )
+        self.n_head = n_head
+        self.head_dim = head_dim
+        self.mode = mode
 
     def forward(self, inp1, inp2, mask=None):
         B, L2, H = inp2.shape
-        NH, HD = self.nhead, self.head_dim
+        NH, HD = self.n_head, self.head_dim
         if self.mode == "copy":
             q, k, v = self.WQ(inp1), inp2, inp2
         else:
@@ -310,14 +308,14 @@ class G2T(nn.Module):
 
     def enc_forward(self, batch, ent_mask, ent_text_mask, ent_len, rel_mask):
         ent_enc = self.ent_enc(
-            self.ent_emb(batch["ent_text"]), ent_text_mask, ent_len=batch["ent_len"]
+            self.ent_emb(batch["g2t_ent_text"]), ent_text_mask, ent_len=batch["g2t_ent_len"]
         )  # (bs, max_num_ent, d)
-        rel_emb = self.rel_emb(batch["rel"])  # (bs, max_num_rel, d)
+        rel_emb = self.rel_emb(batch["g2t_rel"])  # (bs, max_num_rel, d)
         if self.blind:
             g_ent, g_root = ent_enc, ent_enc.mean(1)
         else:
             g_ent, g_root = self.graph_enc(
-                ent_enc, ent_mask, ent_len, rel_emb, rel_mask, batch["graph"]
+                ent_enc, ent_mask, ent_len, rel_emb, rel_mask, batch["g2t_graph"]
             )  # (bs, max_num_ent, d) and (bs, d)
         return self.ln(g_ent), g_root, ent_enc
 
@@ -361,12 +359,12 @@ class G2T(nn.Module):
 
         # (bs, max_num_ent) bool tensor, with max_num_ent/rel the max nb of ent/rel in the batch sentences
         # False if entity j exists in sentence i (i.e. if j < num_ent_i)
-        ent_mask = len2mask(batch["ent_len"], batch["ent_text"].device)
-        ent_text_mask = batch["ent_text"] == 0  # (sum(num_ent_i), max_ent_len)
+        ent_mask = len2mask(batch["g2t_ent_len"], batch["g2t_ent_text"].device)
+        ent_text_mask = batch["g2t_ent_text"] == 0  # (sum(num_ent_i), max_ent_len)
 
-        rel_mask = batch["rel"] == 0  # (bs, max_num_rel), 0 means the <PAD>
+        rel_mask = batch["g2t_rel"] == 0  # (bs, max_num_rel), 0 means the <PAD>
         g_ent, g_root, ent_enc = self.enc_forward(
-            batch, ent_mask, ent_text_mask, batch["ent_len"], rel_mask
+            batch, ent_mask, ent_text_mask, batch["g2t_ent_len"], rel_mask
         )  # (bs, max_num_ent, d), except for g_root which is missing the 1st dim
 
         _h, _c = g_root, g_root.clone().detach()
@@ -380,10 +378,10 @@ class G2T(nn.Module):
             )
             outs = []
             _mask = (
-                batch["text"] >= len(self.text_vocab)
+                batch["g2t_text"] >= len(self.text_vocab)
             ).long()  # 0 if token is in vocab, 1 if entity or unknown
             _inp = (
-                _mask * 3 + (1.0 - _mask) * batch["text"]
+                _mask * 3 + (1.0 - _mask) * batch["g2t_text"]
             )  # 3 is <UNK>, otherwise use token index
             tar_inp = self.tar_emb(_inp.long())
             # Note: x[:,:,None] <-> unsqueeze(-1)
@@ -394,9 +392,9 @@ class G2T(nn.Module):
             ) * tar_inp  # (bs, max_sent_len, d)
             # embeddings for entity tokens (0. elsewhere)
             embeddings_ent = ent_enc[
-                torch.arange(len(batch["text"]))[:, None].to(device),
+                torch.arange(len(batch["g2t_text"]))[:, None].to(device),
                 (
-                    (batch["text"] - len(self.text_vocab)) * _mask
+                    (batch["g2t_text"] - len(self.text_vocab)) * _mask
                 ).long(),  # 0 for ENT_0 and other tokens, i for ENT_i
             ]  # (bs, max_sent_len, d)
             embeddings_ent = (

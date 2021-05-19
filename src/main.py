@@ -98,7 +98,7 @@ def main():
     #   then comment on https://github.com/PyTorchLightning/pytorch-lightning/issues/6328
     #   to request improving documentation since this PR removed the hint
     #   (https://github.com/PyTorchLightning/pytorch-lightning/pull/6907)
-    trainer = pl.Trainer(logger=mlf_logger, max_epochs=conf.tot_epoch)
+    trainer = pl.Trainer(logger=mlf_logger, max_epochs=conf.tot_epoch, gpus=1)
     trainer.fit(model, datamodule=webnlg)
 
     trainer.test(datamodule=webnlg)
