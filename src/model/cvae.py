@@ -9,6 +9,7 @@ from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
 from pytorch_lightning import LightningModule
+from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
 from torch import nn
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
@@ -173,6 +174,21 @@ class CycleCVAE(LightningModule):
             prog_bar=True,
         )
 
+    def on_train_batch_end(self, *args) -> None:
+        # log histogram for weights and gradients
+        tb_logger = self.logger[1]
+        assert isinstance(tb_logger, TensorBoardLogger)
+        if self.global_step % 50 == 0:
+            for name, param in self.named_parameters():
+                tb_logger.experiment.add_histogram(name, param, self.global_step)
+                if param.requires_grad:
+                    try:
+                        tb_logger.experiment.add_histogram(
+                            f"{name}_grad", param.grad, self.global_step
+                        )
+                    except NotImplementedError:
+                        print(f"[{self.global_step}] No gradient for param {name}")
+
     def on_validation_epoch_start(self) -> None:
         # should be what we want, compared to on_validation_start
         # https://github.com/PyTorchLightning/pytorch-lightning/issues/2816
@@ -182,9 +198,15 @@ class CycleCVAE(LightningModule):
         self.g2t_same = []
 
     def on_validation_epoch_end(self) -> None:
+        if isinstance(self.logger, MLFlowLogger):
+            mlflow_logger = self.logger
+        else:
+            mlflow_logger = self.logger[0]
+            assert isinstance(mlflow_logger, MLFlowLogger)
+
         self.wf.close()
-        self.logger.experiment.log_artifact(
-            self.logger.run_id, "/tmp/t2g_out.txt", f"t2g_out/{self.current_epoch}"
+        mlflow_logger.experiment.log_artifact(
+            mlflow_logger.run_id, "/tmp/t2g_out.txt", f"t2g_out/{self.current_epoch}"
         )
 
         # g2t
@@ -217,8 +239,8 @@ class CycleCVAE(LightningModule):
         with open("/tmp/g2t_out.txt", "w", encoding="utf-8") as wf_h:
             for i, h in enumerate(self.g2t_hyp):
                 wf_h.write(str(h) + "\n")
-        self.logger.experiment.log_artifact(
-            self.logger.run_id, "/tmp/g2t_out.txt", f"g2t_out/{self.current_epoch}"
+        mlflow_logger.experiment.log_artifact(
+            mlflow_logger.run_id, "/tmp/g2t_out.txt", f"g2t_out/{self.current_epoch}"
         )
         # compute NLG metrics
         g2t_hyp = dict(

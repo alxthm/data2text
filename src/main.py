@@ -13,6 +13,7 @@ import random
 import torch
 from omegaconf import OmegaConf
 from pytorch_lightning.loggers import MLFlowLogger
+from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 
 from src.data.webnlg import WebNLGDataModule
 from src.model.cvae import CycleCVAE
@@ -50,6 +51,12 @@ def main():
     mlf_logger.log_hyperparams(OmegaConf.to_container(conf))
     for f in (project_dir / "src").rglob("*.py"):
         mlf_logger.experiment.log_artifact(mlf_logger.run_id, f)
+    print(f"---\nRun id: {mlf_logger.run_id}\n---")
+
+    # tensorboard logger for gradients
+    tb_logger = TensorBoardLogger(
+        save_dir=str(project_dir / f"models/{mlf_logger.run_id}")
+    )
 
     # create/load data and vocab
     webnlg = WebNLGDataModule(
@@ -98,7 +105,14 @@ def main():
     #   then comment on https://github.com/PyTorchLightning/pytorch-lightning/issues/6328
     #   to request improving documentation since this PR removed the hint
     #   (https://github.com/PyTorchLightning/pytorch-lightning/pull/6907)
-    trainer = pl.Trainer(logger=mlf_logger, max_epochs=conf.tot_epoch, gpus=1)
+    trainer = pl.Trainer(
+        logger=[mlf_logger, tb_logger],
+        max_epochs=conf.tot_epoch,
+        gpus=1,
+        log_every_n_steps=5,
+        track_grad_norm=2,  # log L2 norm of the gradients
+        weights_summary="full",
+    )
     trainer.fit(model, datamodule=webnlg)
 
     trainer.test(datamodule=webnlg)
