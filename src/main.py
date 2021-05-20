@@ -1,41 +1,39 @@
+import copy
 import datetime
+import json
+import logging
 import os.path
+import random
+from collections import defaultdict
 from pathlib import Path
 
 import mlflow
-import tqdm
-import random
-import yaml
-import argparse
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim
 import torch.nn.functional as F
-import json
-from sklearn.metrics import f1_score
-from collections import defaultdict
-import copy
+import torch.optim
+from omegaconf import OmegaConf
 from pycocoevalcap.bleu.bleu import Bleu
-from pycocoevalcap.rouge.rouge import Rouge
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
+from sklearn.metrics import f1_score
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
-from t2g_model import ModelLSTM
-from g2t_model import GraphWriter
-from data import (
+from src.data.webnlg import (
+    batch2tensor_t2g,
+    batch2tensor_g2t,
     write_txt,
     tensor2data_g2t,
     tensor2data_t2g,
-    batch2tensor_t2g,
-    batch2tensor_g2t,
     scan_data,
     DataPool,
     fill_pool,
 )
-
-import logging
+from src.model.g2t import GraphWriter
+from src.model.t2g import ModelLSTM
 
 logging.basicConfig(level=logging.INFO)
 logging.info("Start Logging")
@@ -50,17 +48,17 @@ def fake_sent(x):
     return " ".join(["<ENT_{0:}>".format(xx) for xx in range(len(x))])
 
 
-def prep_data(config, load=""):
+def prep_data(conf, load=""):
     # prep data always has two steps, build the vocabulary first and then generate data samples
-    train_raw = json.load(open(config["train_file"], "r"))
+    train_raw = json.load(open(conf.train_file, "r"))
     max_len = sorted([len(x["text"].split()) for x in train_raw])[
         int(0.95 * len(train_raw))
     ]
     train_raw = [x for x in train_raw if len(x["text"].split()) < max_len]
-    train_raw = train_raw[: int(len(train_raw) * config["split"])]
+    train_raw = train_raw[: int(len(train_raw) * conf.split)]
 
-    dev_raw = json.load(open(config["dev_file"], "r"))
-    test_raw = json.load(open(config["test_file"], "r"))
+    dev_raw = json.load(open(conf.dev_file, "r"))
+    test_raw = json.load(open(conf.test_file, "r"))
     if len(load) == 0:
         # scan the data and create vocabulary
         vocab = scan_data(train_raw)
@@ -80,7 +78,7 @@ def prep_data(config, load=""):
     _raw = []
     for x in train_raw:
         _x = copy.deepcopy(x)
-        if config["mode"] == "sup":
+        if conf.mode == "sup":
             _raw.append(_x)
         else:  # make sure that no information leak in unsupervised settings
             _x["relations"] = []
@@ -90,7 +88,7 @@ def prep_data(config, load=""):
     _raw = []
     for x in train_raw:
         _x = copy.deepcopy(x)
-        if config["mode"] == "sup":
+        if conf.mode == "sup":
             _raw.append(_x)
         else:  # make sure that no information leak in unsupervised settings
             _x["text"] = fake_sent(_x["entities"])
@@ -111,12 +109,12 @@ def prep_data(config, load=""):
     return pool, vocab
 
 
-def prep_model(config, vocab):
-    g2t_model = GraphWriter(copy.deepcopy(config["g2t"]), vocab)
+def prep_model(conf, vocab):
+    g2t_model = GraphWriter(copy.deepcopy(conf.g2t), vocab)
     t2g_model = ModelLSTM(
         relation_types=len(vocab["relation"]),
-        d_model=config["t2g"]["nhid"],
-        dropout=config["t2g"]["drop"],
+        d_model=conf.t2g.nhid,
+        dropout=conf.t2g.drop,
     )
     return g2t_model, t2g_model
 
@@ -124,7 +122,7 @@ def prep_model(config, vocab):
 vae_step = 0.0
 
 
-def train_g2t_one_step(batch, model, optimizer, config):
+def train_g2t_one_step(batch, model, optimizer, conf):
     global vae_step
     model.train()
     optimizer.zero_grad()
@@ -139,43 +137,38 @@ def train_g2t_one_step(batch, model, optimizer, config):
     )  # magic number
     vae_step += 1
     loss.backward()
-    nn.utils.clip_grad_norm_(model.parameters(), config["clip"])
+    nn.utils.clip_grad_norm_(model.parameters(), conf.clip)
     optimizer.step()
     return loss.item(), kld_loss.item()
 
 
-def train_t2g_one_step(batch, model, optimizer, config, t2g_weight=None):
+def train_t2g_one_step(batch, model, optimizer, conf, device, t2g_weight=None):
     model.train()
     if t2g_weight is not None:
         # category weights
-        weight = torch.from_numpy(t2g_weight).float().to(config["device"])
+        t2g_weight = torch.from_numpy(t2g_weight).float().to(device)
     optimizer.zero_grad()
     # logits for the relation type, between every entity tuple of the sentence
     pred = model(batch)  # (bs, ne, ne, num_relations)
-    if t2g_weight is not None:
-        loss = F.nll_loss(
-            pred.contiguous().view(-1, pred.shape[-1]),
-            batch["tgt"].contiguous().view(-1),  # initially shape (bs, ne, ne)
-            ignore_index=0,
-            weight=weight,
-        )
-    else:
-        loss = F.nll_loss(
-            pred.contiguous().view(-1, pred.shape[-1]),
-            batch["tgt"].contiguous().view(-1),
-            ignore_index=0,
-        )
+    loss = F.nll_loss(
+        pred.contiguous().view(-1, pred.shape[-1]),
+        batch["tgt"].contiguous().view(-1),  # initially shape (bs, ne, ne)
+        ignore_index=0,
+        weight=t2g_weight,
+    )
     loss.backward()
-    nn.utils.clip_grad_norm_(model.parameters(), config["clip"])
+    nn.utils.clip_grad_norm_(model.parameters(), conf.clip)
     optimizer.step()
     return loss.item()
 
 
-def t2g_teach_g2t_one_step(raw_batch, model_t2g, model_g2t, optimizer, config, vocab):
+def t2g_teach_g2t_one_step(
+    raw_batch, model_t2g, model_g2t, optimizer, conf, vocab, device
+):
     # train a g2t model with the synthetic input from t2g model
     model_t2g.eval()
     model_g2t.train()
-    batch_t2g = batch2tensor_t2g(raw_batch, config["t2g"]["device"], vocab)
+    batch_t2g = batch2tensor_t2g(raw_batch, device, vocab)
     with torch.no_grad():
         t2g_pred = model_t2g(batch_t2g).argmax(-1).cpu()
     syn_batch = []
@@ -202,20 +195,20 @@ def t2g_teach_g2t_one_step(raw_batch, model_t2g, model_g2t, optimizer, config, v
         syn_batch.append(_syn)
     if len(syn_batch) == 0:
         return None
-    batch_g2t = batch2tensor_g2t(syn_batch, config["g2t"]["device"], vocab)
-    loss, kld = train_g2t_one_step(batch_g2t, model_g2t, optimizer, config["g2t"])
+    batch_g2t = batch2tensor_g2t(syn_batch, device, vocab)
+    loss, kld = train_g2t_one_step(batch_g2t, model_g2t, optimizer, conf.g2t)
     return loss, kld
 
 
 def g2t_teach_t2g_one_step(
-    raw_batch, model_g2t, model_t2g, optimizer, config, vocab, t2g_weight=None
+    raw_batch, model_g2t, model_t2g, optimizer, conf, vocab, device, t2g_weight=None
 ):
     # train a t2g model with the synthetic input from g2t model
     model_g2t.eval()
     model_t2g.train()
     syn_batch = []
     if len(raw_batch) > 0:
-        batch_g2t = batch2tensor_g2t(raw_batch, config["g2t"]["device"], vocab)
+        batch_g2t = batch2tensor_g2t(raw_batch, device, vocab)
         with torch.no_grad():
             g2t_pred = model_g2t(batch_g2t, beam_size=1).cpu()
         for _i, sample in enumerate(g2t_pred):
@@ -224,30 +217,27 @@ def g2t_teach_t2g_one_step(
                 _s = _s[: _s.index(2)]
             _syn = tensor2data_g2t(raw_batch[_i], _s)
             syn_batch.append(_syn)
-    batch_t2g = batch2tensor_t2g(
-        syn_batch, config["t2g"]["device"], vocab, add_inp=True
-    )
+    batch_t2g = batch2tensor_t2g(syn_batch, device, vocab, add_inp=True)
     loss = train_t2g_one_step(
-        batch_t2g, model_t2g, optimizer, config["t2g"], t2g_weight=t2g_weight
+        batch_t2g, model_t2g, optimizer, conf.t2g, device, t2g_weight=t2g_weight
     )
     return loss
 
 
-def eval_g2t(pool, _type, vocab, model, config, global_step, display=True):
+def eval_g2t(pool, _type, vocab, model, conf, global_step, device):
     logging.info("Eval on {0:}".format(_type))
     model.eval()
     hyp, ref, _same = [], [], []
     unq_hyp = {}
     unq_ref = defaultdict(list)
-    batch_size = 8 * config["batch_size"]
-    with tqdm.tqdm(
+    batch_size = 8 * conf.batch_size
+    with tqdm(
         list(pool.draw_with_type(batch_size, False, _type)),
-        disable=False if display else True,
     ) as tqb:
         for i, _batch in enumerate(tqb):
             with torch.no_grad():
-                batch = batch2tensor_g2t(_batch, config["device"], vocab)
-                seq = model(batch, beam_size=config["beam_size"])
+                batch = batch2tensor_g2t(_batch, device, vocab)
+                seq = model(batch, beam_size=conf.beam_size)
             r = write_txt(batch, batch["tgt"], vocab["text"])
             h = write_txt(batch, seq, vocab["text"])
             _same.extend([str(x["raw_relation"]) + str(x["ent_text"]) for x in _batch])
@@ -297,19 +287,18 @@ def eval_g2t(pool, _type, vocab, model, config, global_step, display=True):
     return ret[0][-1]
 
 
-def eval_t2g(pool, _type, vocab, model, config, global_step, display=True):
+def eval_t2g(pool, _type, vocab, model, conf, global_step, device):
     # evaluate t2g model
     logging.info("Eval on {0:}".format(_type))
     hyp, ref, pos_label = [], [], []
     model.eval()
     wf = open("t2g_show.txt", "w", encoding="utf-8")
-    with tqdm.tqdm(
-        list(pool.draw_with_type(config["batch_size"], False, _type)),
-        disable=False if display else True,
+    with tqdm(
+        list(pool.draw_with_type(conf.batch_size, False, _type)),
     ) as tqb:
         for i, _batch in enumerate(tqb):
             with torch.no_grad():
-                batch = batch2tensor_t2g(_batch, config["device"], vocab)
+                batch = batch2tensor_t2g(_batch, device, vocab)
                 pred = model(batch)
             _pred = pred.view(-1, pred.shape[-1]).argmax(-1).cpu().long().tolist()
             _gold = batch["tgt"].view(-1).cpu().long().tolist()
@@ -387,17 +376,18 @@ def warmup_step1(
     model_t2g,
     optimizerG2T,
     optimizerT2G,
-    config,
+    conf,
     t2g_weight,
     vocab,
+    device,
 ):
     model_g2t.blind, model_t2g.blind = True, True
-    batch = batch2tensor_t2g(batch_t2g, config["t2g"]["device"], vocab)
+    batch = batch2tensor_t2g(batch_t2g, device, vocab)
     loss1 = train_t2g_one_step(
-        batch, model_t2g, optimizerT2G, config["t2g"], t2g_weight=t2g_weight
+        batch, model_t2g, optimizerT2G, conf.t2g, device, t2g_weight=t2g_weight
     )
-    batch = batch2tensor_g2t(batch_g2t, config["g2t"]["device"], vocab)
-    loss2, kld = train_g2t_one_step(batch, model_g2t, optimizerG2T, config["g2t"])
+    batch = batch2tensor_g2t(batch_g2t, device, vocab)
+    loss2, kld = train_g2t_one_step(batch, model_g2t, optimizerG2T, conf.g2t)
     return loss1, loss2, kld
 
 
@@ -408,9 +398,10 @@ def warmup_step2(
     model_t2g,
     optimizerG2T,
     optimizerT2G,
-    config,
+    conf,
     t2g_weight,
     vocab,
+    device,
 ):
     model_g2t.blind, model_t2g.blind = True, False
     _loss1 = g2t_teach_t2g_one_step(
@@ -418,13 +409,14 @@ def warmup_step2(
         model_g2t,
         model_t2g,
         optimizerT2G,
-        config,
+        conf,
         vocab,
+        device,
         t2g_weight=t2g_weight,
     )
     model_g2t.blind, model_t2g.blind = False, True
     _loss2, kld = t2g_teach_g2t_one_step(
-        batch_g2t, model_t2g, model_g2t, optimizerG2T, config, vocab
+        batch_g2t, model_t2g, model_g2t, optimizerG2T, conf, vocab, device
     )
     return _loss1, _loss2, kld
 
@@ -436,17 +428,18 @@ def supervise(
     model_t2g,
     optimizerG2T,
     optimizerT2G,
-    config,
+    conf,
     t2g_weight,
     vocab,
+    device,
 ):
     model_g2t.blind, model_t2g.blind = False, False
-    batch = batch2tensor_t2g(batch_t2g, config["t2g"]["device"], vocab)
+    batch = batch2tensor_t2g(batch_t2g, device, vocab)
     _loss1 = train_t2g_one_step(
-        batch, model_t2g, optimizerT2G, config["t2g"], t2g_weight=t2g_weight
+        batch, model_t2g, optimizerT2G, conf.t2g, device, t2g_weight=t2g_weight
     )
-    batch = batch2tensor_g2t(batch_g2t, config["g2t"]["device"], vocab)
-    _loss2, kld = train_g2t_one_step(batch, model_g2t, optimizerG2T, config["g2t"])
+    batch = batch2tensor_g2t(batch_g2t, device, vocab)
+    _loss2, kld = train_g2t_one_step(batch, model_g2t, optimizerG2T, conf.g2t)
     return _loss1, _loss2, kld
 
 
@@ -457,9 +450,10 @@ def back_translation(
     model_t2g,
     optimizerG2T,
     optimizerT2G,
-    config,
+    conf,
     t2g_weight,
     vocab,
+    device,
 ):
     model_g2t.blind, model_t2g.blind = False, False
     _loss1 = g2t_teach_t2g_one_step(
@@ -467,26 +461,25 @@ def back_translation(
         model_g2t,
         model_t2g,
         optimizerT2G,
-        config,
+        conf,
         vocab,
+        device,
         t2g_weight=t2g_weight,
     )
     _loss2, kld = t2g_teach_g2t_one_step(
-        batch_g2t, model_t2g, model_g2t, optimizerG2T, config, vocab
+        batch_g2t, model_t2g, model_g2t, optimizerG2T, conf, vocab, device
     )
     return _loss1, _loss2, kld
 
 
-def train(_type, config, load):
+def train(_type, conf, load):
     # _type="train" always actually
     dev_id = 0
     device = torch.device(dev_id) if torch.cuda.is_available() else torch.device("cpu")
     print(f"Training on device {device}")
-    config["g2t"]["device"] = device
-    config["t2g"]["device"] = device
     print("Preparing data...")
     if not os.path.isfile("tmp_pool.pt"):
-        pool, vocab = prep_data(config["main"], load=load)
+        pool, vocab = prep_data(conf.main, load=load)
         torch.save(pool, "tmp_pool.pt")
     else:
         pool = torch.load("tmp_pool.pt")
@@ -494,34 +487,31 @@ def train(_type, config, load):
     torch.save(pool, "pool.pt")
     mlflow.log_artifact("pool.pt", "code/pool.pt")
     print("Preparing model...")
-    model_g2t, model_t2g = prep_model(config, vocab)
+    model_g2t, model_t2g = prep_model(conf, vocab)
     model_g2t.to(device)
     model_t2g.to(device)
 
-    from transformers.optimization import (
-        get_cosine_schedule_with_warmup,
-        get_linear_schedule_with_warmup,
-    )
+    from transformers.optimization import get_cosine_schedule_with_warmup
 
     optimizerG2T = torch.optim.Adam(
         model_g2t.parameters(),
-        lr=config["g2t"]["lr"],
-        weight_decay=config["g2t"]["weight_decay"],
+        lr=conf.g2t.lr,
+        weight_decay=conf.g2t.weight_decay,
     )
     schedulerG2T = get_cosine_schedule_with_warmup(
         optimizer=optimizerG2T,
         num_warmup_steps=400,
-        num_training_steps=800 * config["main"]["epoch"],
+        num_training_steps=800 * conf.main.epoch,
     )
     optimizerT2G = torch.optim.Adam(
         model_t2g.parameters(),
-        lr=config["t2g"]["lr"],
-        weight_decay=config["t2g"]["weight_decay"],
+        lr=conf.t2g.lr,
+        weight_decay=conf.t2g.weight_decay,
     )
     schedulerT2G = get_cosine_schedule_with_warmup(
         optimizer=optimizerT2G,
         num_warmup_steps=400,
-        num_training_steps=800 * config["main"]["epoch"],
+        num_training_steps=800 * conf.main.epoch,
     )
     loss_t2g, loss_g2t = [], []
     best_g2t, best_t2g = 0.0, 0.0
@@ -534,24 +524,19 @@ def train(_type, config, load):
     t2g_weight = (max_w + 1000) / (t2g_weight + 1000)
 
     global_step = 0
-    for i in range(0, config["main"]["epoch"]):
+    for i in range(0, conf.main.epoch):
         _data_g2t = list(
-            pool.draw_with_type(config["main"]["batch_size"], True, _type + "_g2t")
+            pool.draw_with_type(conf.main.batch_size, True, _type + "_g2t")
         )
         _data_t2g = list(
-            pool.draw_with_type(config["main"]["batch_size"], True, _type + "_t2g")
+            pool.draw_with_type(conf.main.batch_size, True, _type + "_t2g")
         )
 
         data_list = list(zip(_data_g2t, _data_t2g))
         _data = data_list
-        with tqdm.tqdm(
-            _data, disable=True if not config["main"]["display"] else False
-        ) as tqb:
+        with tqdm(_data) as tqb:
             for j, (batch_g2t, batch_t2g) in enumerate(tqb):
-                if (
-                    i < config["main"]["pre_epoch"]
-                    and config["main"]["mode"] == "warm_unsup"
-                ):
+                if i < conf.main.pre_epoch and conf.main.mode == "warm_unsup":
                     _loss1, _loss2, kld = warmup_step1(
                         batch_g2t,
                         batch_t2g,
@@ -559,14 +544,12 @@ def train(_type, config, load):
                         model_t2g,
                         optimizerG2T,
                         optimizerT2G,
-                        config,
+                        conf,
                         t2g_weight,
                         vocab,
+                        device,
                     )
-                if (
-                    i == config["main"]["pre_epoch"] + 1
-                    and config["main"]["mode"] == "warm_unsup"
-                ):
+                if i == conf.main.pre_epoch + 1 and conf.main.mode == "warm_unsup":
                     _loss1, _loss2, kld = warmup_step2(
                         batch_g2t,
                         batch_t2g,
@@ -574,11 +557,12 @@ def train(_type, config, load):
                         model_t2g,
                         optimizerG2T,
                         optimizerT2G,
-                        config,
+                        conf,
                         t2g_weight,
                         vocab,
+                        device
                     )
-                if config["main"]["mode"] == "sup":
+                if conf.main.mode == "sup":
                     _loss1, _loss2, kld = supervise(
                         batch_g2t,
                         batch_t2g,
@@ -586,14 +570,14 @@ def train(_type, config, load):
                         model_t2g,
                         optimizerG2T,
                         optimizerT2G,
-                        config,
+                        conf,
                         t2g_weight,
                         vocab,
+                        device
                     )
                 if (
-                    i >= config["main"]["pre_epoch"] + 1
-                    and config["main"]["mode"] == "warm_unsup"
-                ) or (config["main"]["mode"] == "cold_unsup"):
+                    i >= conf.main.pre_epoch + 1 and conf.main.mode == "warm_unsup"
+                ) or (conf.main.mode == "cold_unsup"):
                     _loss1, _loss2, kld = back_translation(
                         batch_g2t,
                         batch_t2g,
@@ -601,9 +585,10 @@ def train(_type, config, load):
                         model_t2g,
                         optimizerG2T,
                         optimizerT2G,
-                        config,
+                        conf,
                         t2g_weight,
                         vocab,
+                        device
                     )
                 loss_t2g.append(_loss1)
                 schedulerT2G.step()
@@ -623,10 +608,7 @@ def train(_type, config, load):
 
         logging.info("Epoch " + str(i))
         if i % 1 == 0:
-            if (
-                i < config["main"]["pre_epoch"]
-                and config["main"]["mode"] == "warm_unsup"
-            ):
+            if i < conf.main.pre_epoch and conf.main.mode == "warm_unsup":
                 model_g2t.blind, model_t2g.blind = True, True
             else:
                 model_g2t.blind, model_t2g.blind = False, False
@@ -636,9 +618,9 @@ def train(_type, config, load):
                     "dev_t2g_blind",
                     vocab,
                     model_t2g,
-                    config["t2g"],
+                    conf.t2g,
                     global_step,
-                    display=config["main"]["display"],
+                    device,
                 )
             else:
                 e = eval_t2g(
@@ -646,16 +628,16 @@ def train(_type, config, load):
                     "dev",
                     vocab,
                     model_t2g,
-                    config["t2g"],
+                    conf.t2g,
                     global_step,
-                    display=config["main"]["display"],
+                    device,
                 )
             if e > best_t2g or i % 15 == 0:
                 if e > best_t2g:
-                    file_name = f'{config["t2g"]["save"]}_best'
+                    file_name = f"{conf.t2g.save}_best"
                     logging.info(f"best model so far saved, epoch {i}")
                 else:
-                    file_name = f'{config["t2g"]["save"]}_ep{i}'
+                    file_name = f"{conf.t2g.save}_ep{i}"
                 best_t2g = max(best_t2g, e)
                 torch.save(model_t2g.state_dict(), file_name)
                 mlflow.log_artifact(file_name, file_name)
@@ -665,71 +647,45 @@ def train(_type, config, load):
                 "dev",
                 vocab,
                 model_g2t,
-                config["g2t"],
+                conf.g2t,
                 global_step,
-                display=config["main"]["display"],
+                device,
             )
             if e > best_g2t or i % 15 == 0:
                 if e > best_g2t:
-                    file_name = f'{config["g2t"]["save"]}_best'
+                    file_name = f"{conf.g2t.save}_best"
                     logging.info(f"best model so far saved, epoch {i}")
                 else:
-                    file_name = f'{config["g2t"]["save"]}_ep{i}'
+                    file_name = f"{conf.g2t.save}_ep{i}"
                 best_g2t = max(best_g2t, e)
                 torch.save(model_g2t.state_dict(), file_name)
                 mlflow.log_artifact(file_name, file_name)
-            if i == config["main"]["pre_epoch"]:
-                torch.save(model_t2g.state_dict(), config["t2g"]["save"] + "X" + "mid")
-                torch.save(model_g2t.state_dict(), config["g2t"]["save"] + "X" + "mid")
-    model_g2t.load_state_dict(torch.load(config["g2t"]["save"] + "X" + "best"))
-    model_t2g.load_state_dict(torch.load(config["t2g"]["save"] + "X" + "best"))
-    logging.info("Final Test mode {0:}".format(config["main"]["mode"]))
-    e = eval_t2g(pool, "test", vocab, model_t2g, config["t2g"], global_step)
-    e = eval_g2t(pool, "test", vocab, model_g2t, config["g2t"], global_step)
-
-
-def multi_run():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config.yaml")
-    args = parser.parse_args()
-    for i in range(100):
-        config = yaml.load(open(args.config, "r"))
-        config["main"]["seed"] = random.randint(0, 1e8)
-        config["main"]["mode"] = random.choice(["sup", "warm_unsup", "cold_unsup"])
-        config["main"]["display"] = False
-        save_str = str(random.randint(0, 1e5))
-        config["g2t"]["save"] += save_str
-        config["t2g"]["save"] += save_str
-        _config = copy.deepcopy(config)
-        random.seed(config["main"]["seed"])
-        torch.manual_seed(config["main"]["seed"])
-        np.random.seed(config["main"]["seed"])
-        torch.cuda.manual_seed_all(config["main"]["seed"])
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-        vocab = prep_data(config["main"])
-        torch.save({"vocab": vocab}, "tmp_vocab.pt" + str(config["main"]["seed"]))
-        train("train", config, load="tmp_vocab.pt" + str(config["main"]["seed"]))
+            if i == conf.main.pre_epoch:
+                torch.save(model_t2g.state_dict(), conf.t2g.save + "X" + "mid")
+                torch.save(model_g2t.state_dict(), conf.g2t.save + "X" + "mid")
+    model_g2t.load_state_dict(torch.load(conf.g2t.save + "X" + "best"))
+    model_t2g.load_state_dict(torch.load(conf.t2g.save + "X" + "best"))
+    logging.info("Final Test mode {0:}".format(conf.main.mode))
+    e = eval_t2g(pool, "test", vocab, model_t2g, conf.t2g, global_step, device)
+    e = eval_g2t(pool, "test", vocab, model_g2t, conf.g2t, global_step, device)
 
 
 def main(timestamp: str):
-    project_dir = Path(__file__).resolve().parents[0]
+    # Load config
+    project_dir = Path(__file__).resolve().parents[1]
+    conf = OmegaConf.load(project_dir / "conf/config.yaml")
+    print(OmegaConf.to_yaml(conf))
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config.yaml")
-    args = parser.parse_args()
-    config = yaml.load(open(args.config, "r"))
-    _config = copy.deepcopy(config)
-    random.seed(config["main"]["seed"])
-    torch.manual_seed(config["main"]["seed"])
-    np.random.seed(config["main"]["seed"])
-    torch.cuda.manual_seed_all(config["main"]["seed"])
+    # seed everything
+    random.seed(conf.main.seed)
+    torch.manual_seed(conf.main.seed)
+    np.random.seed(conf.main.seed)
+    torch.cuda.manual_seed_all(conf.main.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
     if not os.path.isfile("tmp_vocab.pt"):
-        vocab = prep_data(config["main"])
+        vocab = prep_data(conf.main)
         torch.save({"vocab": vocab}, "tmp_vocab.pt")
 
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
@@ -739,26 +695,23 @@ def main(timestamp: str):
     mlflow.set_experiment("al.thomas_data_2_text")
     # todo: batch updates to speed up training
     #  https://www.mlflow.org/docs/latest/python_api/mlflow.tracking.html#mlflow.tracking.MlflowClient.log_batch
-    run_name = f"{timestamp}-{config['main']['mode']}"
+    run_name = f"{timestamp}-{conf.main.mode}"
     global tb_writer
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
 
     with mlflow.start_run(run_name=run_name):
-        # save config
-        print(config)
-        for k1 in config.keys():
-            for k2 in config[k1].keys():
-                mlflow.log_param(f"{k1}_{k2}", config[k1][k2])
+        for k1 in conf.keys():
+            for k2 in conf[k1].keys():
+                mlflow.log_param(f"{k1}_{k2}", conf[k1][k2])
         # save source files and vocab
-        for f in os.listdir():
-            if f.endswith(".py") or f.endswith(".yaml") or f == "tmp_vocab.pt":
-                mlflow.log_artifact(f, f"code/{f}")
+        for f in (project_dir / "src").rglob("*.py"):
+            mlflow.log_artifact(str(f), f"code/{f}")
+        mlflow.log_artifact(str(project_dir / "tmp_vocab.pt"), f"code/tmp_vocab.pt")
 
         # train
-        train("train", config, load="tmp_vocab.pt")
+        train("train", conf, load="tmp_vocab.pt")
 
 
 if __name__ == "__main__":
     timestamp = datetime.datetime.today().strftime("%m%d%H%M%S")
     main(timestamp=timestamp)
-    # multi_run()
