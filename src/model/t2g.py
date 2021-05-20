@@ -46,9 +46,9 @@ class ModelLSTM(nn.Module):
         d = self.d_model
 
         # full sentences (with entities as plain text), pretokenized with BERT
-        sents = batch["sents"]  # tensor of shape (bs, n)
+        sents = batch["t2g_sents"]  # tensor of shape (bs, n)
         # tuples of start/end indices for entities in sents (order: ENT_0, ENT_1, etc)
-        ents = batch["ents"]  # list of lists, (bs, num_entities_i)
+        ents = batch["t2g_ents"]  # list of lists, (bs, num_entities_i)
         if self.blind:  # blind means using entity only
             s = torch.zeros_like(sents)
         else:

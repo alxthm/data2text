@@ -38,3 +38,4 @@ main:
     test_file: "test.json"
     display: True
     mode: "sup" #['sup', 'cold_unsup', 'warm_unsup']
+#-W ignore::FutureWarning:mlflow.store.artifact.hdfs_artifact_repo:194
