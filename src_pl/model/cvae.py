@@ -13,9 +13,9 @@ from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
 from torch import nn
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
-from src.data.webnlg import Vocab, write_txt
-from src.model.g2t import G2T
-from src.model.t2g import T2G
+from src_pl.data.webnlg import Vocab, write_txt
+from src_pl.model.g2t import G2T
+from src_pl.model.t2g import T2G
 
 
 class CycleCVAE(LightningModule):

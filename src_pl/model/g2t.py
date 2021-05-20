@@ -6,7 +6,7 @@ from dgl.nn.pytorch import edge_softmax
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
 
-from src.data.webnlg import Vocab, pad, NodeType
+from src_pl.data.webnlg import Vocab, pad, NodeType
 
 
 def replace_ent(x, ent, V, emb):

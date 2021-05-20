@@ -15,14 +15,14 @@ from omegaconf import OmegaConf
 from pytorch_lightning.loggers import MLFlowLogger
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 
-from src.data.webnlg import WebNLGDataModule
-from src.model.cvae import CycleCVAE
+from src_pl.data.webnlg import WebNLGDataModule
+from src_pl.model.cvae import CycleCVAE
 
 
 def save_src(log_dir: str, conf):
     os.makedirs(log_dir, exist_ok=True)
     # save config and source files as text files
-    with open(f"{log_dir}/conf.yaml", "w") as f:
+    with open(f"{log_dir}/conf_pl.yaml", "w") as f:
         OmegaConf.save(conf, f)
     for f in glob.iglob("*.py"):
         shutil.copy2(f, log_dir)
@@ -31,7 +31,7 @@ def save_src(log_dir: str, conf):
 def main():
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
-    conf = OmegaConf.load(project_dir / "conf/conf.yaml")
+    conf = OmegaConf.load(project_dir / "conf/conf_pl.yaml")
     print(OmegaConf.to_yaml(conf))
 
     # seed everything # todo: use pl?
@@ -49,7 +49,7 @@ def main():
         tags={"mode": conf.mode},
     )
     mlf_logger.log_hyperparams(OmegaConf.to_container(conf))
-    for f in (project_dir / "src").rglob("*.py"):
+    for f in (project_dir / "src_pl").rglob("*.py"):
         mlf_logger.experiment.log_artifact(mlf_logger.run_id, f)
     print(f"---\nRun id: {mlf_logger.run_id}\n---")
 
