@@ -395,7 +395,10 @@ class WebNLGDataModule(LightningDataModule):
 
     def train_dataloader(self) -> Any:
         return DataLoader(
-            self.dataset_train, self.batch_size, collate_fn=self.collate_fn
+            self.dataset_train,
+            self.batch_size,
+            shuffle=True,
+            collate_fn=self.collate_fn,
         )
 
     def val_dataloader(self) -> Union[DataLoader, List[DataLoader]]:

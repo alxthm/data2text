@@ -111,7 +111,6 @@ def main():
         gpus=1,
         log_every_n_steps=5,
         track_grad_norm=2,  # log L2 norm of the gradients
-        weights_summary="full",
     )
     trainer.fit(model, datamodule=webnlg)
 
