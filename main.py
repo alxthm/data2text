@@ -1,5 +1,6 @@
 import datetime
 import os.path
+from pathlib import Path
 
 import mlflow
 import tqdm
@@ -19,6 +20,7 @@ from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.rouge.rouge import Rouge
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.meteor.meteor import Meteor
+from torch.utils.tensorboard import SummaryWriter
 
 from t2g_model import ModelLSTM
 from g2t_model import GraphWriter
@@ -41,6 +43,7 @@ bleu = Bleu(4)
 meteor = Meteor()
 rouge = Rouge()
 cider = Cider()
+tb_writer: SummaryWriter = None
 
 
 def fake_sent(x):
@@ -287,6 +290,7 @@ def eval_g2t(pool, _type, vocab, model, config, global_step, display=True):
     }
     for k, v in metrics.items():
         logging.info(f"{k} {v}")
+        tb_writer.add_scalar(k, v, global_step=global_step)
 
     mlflow.log_artifact("hyp.txt", f"g2t_hyp/{global_step}")
     mlflow.log_metrics(metrics, step=global_step)
@@ -371,6 +375,8 @@ def eval_t2g(pool, _type, vocab, model, config, global_step, display=True):
     mlflow.log_metrics(
         {f"{_type}_f1_micro": f1_micro, f"{_type}_f1_macro": f1_macro}, step=global_step
     )
+    tb_writer.add_scalar(f"{_type}_f1_micro", f1_micro, global_step=global_step)
+    tb_writer.add_scalar(f"{_type}_f1_macro", f1_macro, global_step=global_step)
     return f1_micro
 
 
@@ -479,7 +485,12 @@ def train(_type, config, load):
     config["g2t"]["device"] = device
     config["t2g"]["device"] = device
     print("Preparing data...")
-    pool, vocab = prep_data(config["main"], load=load)
+    if not os.path.isfile("tmp_pool.pt"):
+        pool, vocab = prep_data(config["main"], load=load)
+        torch.save(pool, "tmp_pool.pt")
+    else:
+        pool = torch.load("tmp_pool.pt")
+        vocab = torch.load(load)["vocab"]
     torch.save(pool, "pool.pt")
     mlflow.log_artifact("pool.pt", "code/pool.pt")
     print("Preparing model...")
@@ -605,6 +616,8 @@ def train(_type, config, load):
                     "train_kld": np.mean(klds),
                 }
                 mlflow.log_metrics(metrics, step=global_step)
+                for k, v in metrics.items():
+                    tb_writer.add_scalar(k, v, global_step=global_step)
                 tqb.set_postfix(metrics)
                 global_step += 1
 
@@ -640,7 +653,7 @@ def train(_type, config, load):
             if e > best_t2g or i % 15 == 0:
                 if e > best_t2g:
                     file_name = f'{config["t2g"]["save"]}_best'
-                    logging.info(f'best model so far saved, epoch {i}')
+                    logging.info(f"best model so far saved, epoch {i}")
                 else:
                     file_name = f'{config["t2g"]["save"]}_ep{i}'
                 best_t2g = max(best_t2g, e)
@@ -659,7 +672,7 @@ def train(_type, config, load):
             if e > best_g2t or i % 15 == 0:
                 if e > best_g2t:
                     file_name = f'{config["g2t"]["save"]}_best'
-                    logging.info(f'best model so far saved, epoch {i}')
+                    logging.info(f"best model so far saved, epoch {i}")
                 else:
                     file_name = f'{config["g2t"]["save"]}_ep{i}'
                 best_g2t = max(best_g2t, e)
@@ -701,6 +714,8 @@ def multi_run():
 
 
 def main(timestamp: str):
+    project_dir = Path(__file__).resolve().parents[0]
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config.yaml")
     args = parser.parse_args()
@@ -724,8 +739,11 @@ def main(timestamp: str):
     mlflow.set_experiment("al.thomas_data_2_text")
     # todo: batch updates to speed up training
     #  https://www.mlflow.org/docs/latest/python_api/mlflow.tracking.html#mlflow.tracking.MlflowClient.log_batch
+    run_name = f"{timestamp}-{config['main']['mode']}"
+    global tb_writer
+    tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
 
-    with mlflow.start_run(run_name=f"{timestamp}-{config['main']['mode']}"):
+    with mlflow.start_run(run_name=run_name):
         # save config
         print(config)
         for k1 in config.keys():
