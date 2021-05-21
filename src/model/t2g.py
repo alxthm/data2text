@@ -1,10 +1,13 @@
+from typing import List
+
+import numpy as np
 import torch as torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ModelLSTM(nn.Module):
-    def __init__(self, relation_types=7, dropout=0.0, d_model=768):
+class T2G(nn.Module):
+    def __init__(self, relation_types: int, dropout: float, d_model: int):
         super().__init__()
 
         self.d_model = d_model
@@ -87,3 +90,22 @@ class ModelLSTM(nn.Module):
         alpha = alpha * ent_mask.view(bs, ne, 1, 1) * ent_mask.view(bs, 1, ne, 1)
 
         return torch.log_softmax(alpha, -1)
+
+
+def write_t2g_log(wf, rel_vocab, rel_pred: np.array, ents: List[List]):
+    """
+    Write a predicted graph as plain text to the logging file
+
+    Args:
+        rel_pred: numpy array of shape (max_num_ent, max_num_ent).
+            Contains the indices of predicted relations between entities.
+        ents: list of entities for this example, each entity being a list of tokens
+
+    """
+    rels = []
+    for e1 in range(len(ents)):
+        for e2 in range(len(ents)):
+            # 0: padding, 3: unknown
+            if rel_pred[e1, e2] != 3 and rel_pred[e1, e2] != 0:
+                rels.append((e1, int(rel_pred[e1, e2]), e2))
+    wf.write(str([(ents[e1], rel_vocab(r), ents[e2]) for e1, r, e2 in rels]) + "\n")
