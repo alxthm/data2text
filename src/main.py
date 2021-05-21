@@ -1,6 +1,5 @@
 import copy
 import datetime
-import logging
 import random
 import sys
 from collections import defaultdict
@@ -29,78 +28,11 @@ from src.model.g2t import GraphWriter
 from src.model.t2g import ModelLSTM
 from src.utils import WarningsFilter
 
-logging.basicConfig(level=logging.INFO)
-logging.info("Start Logging")
 bleu = Bleu(4)
 meteor = Meteor()
 rouge = Rouge()
 cider = Cider()
 tb_writer: SummaryWriter = None
-
-
-def fake_sent(x):
-    return " ".join(["<ENT_{0:}>".format(xx) for xx in range(len(x))])
-
-
-# def prep_data(conf, load=""):
-#     # prep data always has two steps, build the vocabulary first and then generate data samples
-#     train_raw = json.load(open(conf.train_file, "r"))
-#     max_len = sorted([len(x["text"].split()) for x in train_raw])[
-#         int(0.95 * len(train_raw))
-#     ]
-#     train_raw = [x for x in train_raw if len(x["text"].split()) < max_len]
-#     train_raw = train_raw[: int(len(train_raw) * conf.split)]
-#
-#     dev_raw = json.load(open(conf.dev_file, "r"))
-#     test_raw = json.load(open(conf.test_file, "r"))
-#     if len(load) == 0:
-#         # scan the data and create vocabulary
-#         vocab = scan_data(train_raw)
-#         vocab = scan_data(dev_raw, vocab)
-#         vocab = scan_data(test_raw, vocab, sp=True)
-#         for v in vocab.values():
-#             v.build()
-#             logging.info(
-#                 "Vocab Size {0:}, detached by test set {1:}".format(len(v), len(v.sp))
-#             )
-#         return vocab
-#     else:
-#         vocab = torch.load(load)["vocab"]
-#
-#     logging.info("MAX_LEN {0:}".format(max_len))
-#     pool = DataPool()
-#     _raw = []
-#     for x in train_raw:
-#         _x = copy.deepcopy(x)
-#         if conf.mode == "sup":
-#             _raw.append(_x)
-#         else:  # make sure that no information leak in unsupervised settings
-#             _x["relations"] = []
-#             _raw.append(_x)
-#
-#     fill_pool(pool, vocab, _raw, "train_g2t")
-#     _raw = []
-#     for x in train_raw:
-#         _x = copy.deepcopy(x)
-#         if conf.mode == "sup":
-#             _raw.append(_x)
-#         else:  # make sure that no information leak in unsupervised settings
-#             _x["text"] = fake_sent(_x["entities"])
-#             _raw.append(_x)
-#
-#     fill_pool(pool, vocab, _raw, "train_t2g")
-#     _raw = []
-#     for x in dev_raw:
-#         _x = copy.deepcopy(x)
-#         _x["text"] = fake_sent(_x["entities"])
-#         _raw.append(_x)
-#
-#     fill_pool(pool, vocab, dev_raw, "dev")
-#     fill_pool(
-#         pool, vocab, _raw, "dev_t2g_blind"
-#     )  # prepare for the entity2graph setting
-#     fill_pool(pool, vocab, test_raw, "test")
-#     return pool, vocab
 
 
 def prep_model(conf, vocab):
@@ -113,27 +45,19 @@ def prep_model(conf, vocab):
     return g2t_model, t2g_model
 
 
-vae_step = 0.0
-
-
-def train_g2t_one_step(batch, model, optimizer, conf):
-    global vae_step
+def train_g2t_one_step(batch, model, optimizer, conf, global_step):
     model.train()
     optimizer.zero_grad()
-    pred, pred_c, kld_loss = model(batch)
-    loss = F.nll_loss(
+    pred, pred_c, kl_div = model(batch)
+    recon_loss = F.nll_loss(
         pred.reshape(-1, pred.shape[-1]), batch["g2t_tgt"].reshape(-1), ignore_index=0
     )
-    loss = loss  # + 1.0 * ((1.-pred_c.sum(1))**2).mean() #coverage penalty
-    loss = (
-        loss
-        + min(1.0, (vae_step + 100) / (vae_step + 10000)) * 8.0 * 1.0 / 385 * kld_loss
-    )  # magic number
-    vae_step += 1
+    kl_anneal = min(1.0, (global_step + 100) / (global_step + 10000))
+    loss = recon_loss + kl_anneal * 8.0 / 385 * kl_div
     loss.backward()
     nn.utils.clip_grad_norm_(model.parameters(), conf.clip)
     optimizer.step()
-    return loss.item(), kld_loss.item()
+    return loss.item(), recon_loss.item(), kl_div.item()
 
 
 def train_t2g_one_step(batch, model, optimizer, conf, device, t2g_weight=None):
@@ -156,214 +80,6 @@ def train_t2g_one_step(batch, model, optimizer, conf, device, t2g_weight=None):
     return loss.item()
 
 
-# def t2g_teach_g2t_one_step(
-#     raw_batch, model_t2g, model_g2t, optimizer, conf, vocab, device
-# ):
-#     # train a g2t model with the synthetic input from t2g model
-#     model_t2g.eval()
-#     model_g2t.train()
-#     batch_t2g = batch2tensor_t2g(raw_batch, device, vocab)
-#     with torch.no_grad():
-#         t2g_pred = model_t2g(batch_t2g).argmax(-1).cpu()
-#     syn_batch = []
-#     for _i, sample in enumerate(t2g_pred):
-#         rel = []
-#         for e1 in range(len(raw_batch[_i]["ent_text"])):
-#             for e2 in range(len(raw_batch[_i]["ent_text"])):
-#                 try:
-#                     if (
-#                         sample[e1, e2] != 3 and sample[e1, e2] != 0
-#                     ):  # 3 is no relation and 0 is <PAD>
-#                         rel.append([e1, int(sample[e1, e2]), e2])
-#                 except:
-#                     logging.warn(
-#                         "{0:}".format(
-#                             [
-#                                 [vocab["entity"](x) for x in y]
-#                                 for y in raw_batch[_i]["ent_text"]
-#                             ]
-#                         )
-#                     )
-#                     logging.warn("{0:}".format(sample.size()))
-#         _syn = tensor2data_t2g(raw_batch[_i], rel, vocab)
-#         syn_batch.append(_syn)
-#     if len(syn_batch) == 0:
-#         return None
-#     batch_g2t = batch2tensor_g2t(syn_batch, device, vocab)
-#     loss, kld = train_g2t_one_step(batch_g2t, model_g2t, optimizer, conf.g2t)
-#     return loss, kld
-#
-#
-# def g2t_teach_t2g_one_step(
-#     raw_batch, model_g2t, model_t2g, optimizer, conf, vocab, device, t2g_weight=None
-# ):
-#     # train a t2g model with the synthetic input from g2t model
-#     model_g2t.eval()
-#     model_t2g.train()
-#     syn_batch = []
-#     if len(raw_batch) > 0:
-#         batch_g2t = batch2tensor_g2t(raw_batch, device, vocab)
-#         with torch.no_grad():
-#             g2t_pred = model_g2t(batch_g2t, beam_size=1).cpu()
-#         for _i, sample in enumerate(g2t_pred):
-#             _s = sample.tolist()
-#             if 2 in _s:  # <EOS> in list
-#                 _s = _s[: _s.index(2)]
-#             _syn = tensor2data_g2t(raw_batch[_i], _s)
-#             syn_batch.append(_syn)
-#     batch_t2g = batch2tensor_t2g(syn_batch, device, vocab, add_inp=True)
-#     loss = train_t2g_one_step(
-#         batch_t2g, model_t2g, optimizer, conf.t2g, device, t2g_weight=t2g_weight
-#     )
-#     return loss
-
-
-# def eval_g2t(pool, _type, vocab, model, conf, global_step, device):
-#     logging.info("Eval on {0:}".format(_type))
-#     model.eval()
-#     hyp, ref, _same = [], [], []
-#     unq_hyp = {}
-#     unq_ref = defaultdict(list)
-#     batch_size = 8 * conf.batch_size
-#     with tqdm(
-#         list(pool.draw_with_type(batch_size, False, _type)),
-#     ) as tqb:
-#         for i, _batch in enumerate(tqb):
-#             with torch.no_grad():
-#                 batch = batch2tensor_g2t(_batch, device, vocab)
-#                 seq = model(batch, beam_size=conf.beam_size)
-#             r = write_txt(batch, batch["tgt"], vocab["text"])
-#             h = write_txt(batch, seq, vocab["text"])
-#             _same.extend([str(x["raw_relation"]) + str(x["ent_text"]) for x in _batch])
-#             hyp.extend(h)
-#             ref.extend(r)
-#         hyp = [x[0] for x in hyp]
-#         ref = [x[0] for x in ref]
-#         idxs, _same = list(zip(*sorted(enumerate(_same), key=lambda x: x[1])))
-#
-#         ptr = 0
-#         for i in range(len(hyp)):
-#             if i > 0 and _same[i] != _same[i - 1]:
-#                 ptr += 1
-#             unq_hyp[ptr] = hyp[idxs[i]]
-#             unq_ref[ptr].append(ref[idxs[i]])
-#
-#         max_len = max([len(ref) for ref in unq_ref.values()])
-#         unq_hyp = sorted(unq_hyp.items(), key=lambda x: x[0])
-#         unq_ref = sorted(unq_ref.items(), key=lambda x: x[0])
-#         hyp = [x[1] for x in unq_hyp]
-#         ref = [[x.lower() for x in y[1]] for y in unq_ref]
-#
-#     wf_h = open("hyp.txt", "w", encoding="utf-8")
-#     for i, h in enumerate(hyp):
-#         wf_h.write(str(h) + "\n")
-#     wf_h.close()
-#     hyp = dict(zip(range(len(hyp)), [[x.lower()] for x in hyp]))
-#     ref = dict(zip(range(len(ref)), ref))
-#     ret = bleu.compute_score(ref, hyp)
-#
-#     metrics = {
-#         "BLEU INP": len(hyp),
-#         "BLEU 1": ret[0][0],
-#         "BLEU 2": ret[0][1],
-#         "BLEU 3": ret[0][2],
-#         "BLEU 4": ret[0][3],
-#         "METEOR": meteor.compute_score(ref, hyp)[0],
-#         "ROUGE_L": (rouge.compute_score(ref, hyp)[0]),
-#         "Cider": cider.compute_score(ref, hyp)[0],
-#     }
-#     for k, v in metrics.items():
-#         logging.info(f"{k} {v}")
-#         tb_writer.add_scalar(k, v, global_step=global_step)
-#
-#     mlflow.log_artifact("hyp.txt", f"g2t_hyp/{global_step}")
-#     mlflow.log_metrics(metrics, step=global_step)
-#     return ret[0][-1]
-#
-#
-# def eval_t2g(pool, _type, vocab, model, conf, global_step, device):
-#     # evaluate t2g model
-#     logging.info("Eval on {0:}".format(_type))
-#     hyp, ref, pos_label = [], [], []
-#     model.eval()
-#     wf = open("t2g_show.txt", "w", encoding="utf-8")
-#     with tqdm(
-#         list(pool.draw_with_type(conf.batch_size, False, _type)),
-#     ) as tqb:
-#         for i, _batch in enumerate(tqb):
-#             with torch.no_grad():
-#                 batch = batch2tensor_t2g(_batch, device, vocab)
-#                 pred = model(batch)
-#             _pred = pred.view(-1, pred.shape[-1]).argmax(-1).cpu().long().tolist()
-#             _gold = batch["tgt"].view(-1).cpu().long().tolist()
-#             tpred = pred.argmax(-1).cpu().numpy()
-#             tgold = batch["tgt"].cpu().numpy()
-#
-#             cnts = []
-#             for j in range(len(_batch)):
-#                 _cnt = 0
-#                 ents = [
-#                     [y for y in vocab["entity"](x) if y[0] != "<"]
-#                     for x in _batch[j]["ent_text"]
-#                 ]
-#                 wf.write("=====================\n")
-#                 rels = []
-#                 for e1 in range(len(ents)):
-#                     for e2 in range(len(ents)):
-#                         if tpred[j, e1, e2] != 3 and tpred[j, e1, e2] != 0:
-#                             rels.append((e1, int(tpred[j, e1, e2]), e2))
-#                 wf.write(
-#                     str(
-#                         [
-#                             (ents[e1], vocab["relation"](r), ents[e2])
-#                             for e1, r, e2 in rels
-#                         ]
-#                     )
-#                     + "\n"
-#                 )
-#                 rels = []
-#                 for e1 in range(len(ents)):
-#                     for e2 in range(len(ents)):
-#                         if tgold[j, e1, e2] != 3 and tgold[j, e1, e2] != 0:
-#                             rels.append((e1, int(tgold[j, e1, e2]), e2))
-#                         if tgold[j, e1, e2] > 0:
-#                             _cnt += 1
-#                 wf.write(
-#                     str(
-#                         [
-#                             (ents[e1], vocab["relation"](r), ents[e2])
-#                             for e1, r, e2 in rels
-#                         ]
-#                     )
-#                     + "\n"
-#                 )
-#                 cnts.append(_cnt)
-#
-#             pred, gold = [], []
-#             for j in range(len(_gold)):
-#                 if _gold[j] > 0:  # not the <PAD>
-#                     pred.append(_pred[j])
-#                     gold.append(_gold[j])
-#             pos_label.extend([x for x in gold if x != 3])  # 3 is no relation
-#             hyp.extend(pred)
-#             ref.extend(gold)
-#     wf.close()
-#     pos_label = list(set(pos_label))
-#
-#     f1_micro = f1_score(ref, hyp, average="micro", labels=pos_label, zero_division=0)
-#     f1_macro = f1_score(ref, hyp, average="macro", labels=pos_label, zero_division=0)
-#
-#     logging.info("F1 micro {0:} F1 macro {1:}".format(f1_micro, f1_macro))
-#     mlflow.log_artifact("t2g_show.txt", f"t2g_show/{global_step}")
-#     mlflow.log_metrics(
-#         {f"{_type}_f1_micro": f1_micro, f"{_type}_f1_macro": f1_macro}, step=global_step
-#     )
-#     tb_writer.add_scalar(f"{_type}_f1_micro", f1_micro, global_step=global_step)
-#     tb_writer.add_scalar(f"{_type}_f1_macro", f1_macro, global_step=global_step)
-#     return f1_micro
-#
-
-
 def supervise(
     batch,
     model_g2t,
@@ -372,17 +88,17 @@ def supervise(
     optimizerT2G,
     conf,
     t2g_weight,
-    vocab,
     device,
+    global_step,
 ):
     model_g2t.blind, model_t2g.blind = False, False
-    # batch = batch2tensor_t2g(batch_t2g, device, vocab)
-    _loss1 = train_t2g_one_step(
+    loss_t2g = train_t2g_one_step(
         batch, model_t2g, optimizerT2G, conf.t2g, device, t2g_weight=t2g_weight
     )
-    # batch = batch2tensor_g2t(batch_g2t, device, vocab)
-    _loss2, kld = train_g2t_one_step(batch, model_g2t, optimizerG2T, conf.g2t)
-    return _loss1, _loss2, kld
+    loss_g2t, recon_loss, kl_div = train_g2t_one_step(
+        batch, model_g2t, optimizerG2T, conf.g2t, global_step
+    )
+    return loss_t2g, loss_g2t, recon_loss, kl_div
 
 
 def write_t2g_log(wf, rel_vocab, rel_pred: np.array, ents: List[List]):
@@ -519,38 +235,7 @@ def evaluate(dataloader_val, t2g_model, g2t_model, vocab, global_step, beam_size
     }
     mlflow.log_metrics(metrics)
     for k, v in metrics.items():
-        # logging.info(f"{k} {v}")
         tb_writer.add_scalar(k, v, global_step=global_step)
-
-
-# def back_translation(
-#     batch_g2t,
-#     batch_t2g,
-#     model_g2t,
-#     model_t2g,
-#     optimizerG2T,
-#     optimizerT2G,
-#     conf,
-#     t2g_weight,
-#     vocab,
-#     device,
-# ):
-#     model_g2t.blind, model_t2g.blind = False, False
-#     _loss1 = g2t_teach_t2g_one_step(
-#         batch_t2g,
-#         model_g2t,
-#         model_t2g,
-#         optimizerT2G,
-#         conf,
-#         vocab,
-#         device,
-#         t2g_weight=t2g_weight,
-#     )
-#     _loss2, kld = t2g_teach_g2t_one_step(
-#         batch_g2t, model_t2g, model_g2t, optimizerG2T, conf, vocab, device
-#     )
-#     return _loss1, _loss2, kld
-#
 
 
 def train(conf, device, dataloader_train, dataloader_val, dataloader_test, vocab):
@@ -579,8 +264,6 @@ def train(conf, device, dataloader_train, dataloader_val, dataloader_test, vocab
         num_warmup_steps=400,
         num_training_steps=800 * conf.main.epoch,
     )
-    loss_t2g, loss_g2t = [], []
-    klds = []
 
     t2g_weight = [vocab["relation"].wf.get(x, 0) for x in vocab["relation"].i2s]
     t2g_weight[0] = 0
@@ -590,17 +273,11 @@ def train(conf, device, dataloader_train, dataloader_val, dataloader_test, vocab
 
     global_step = 0
     for i in range(0, conf.main.epoch):
+        # training step
         model_t2g.train()
         model_g2t.train()
-
-        # _data_g2t = list(pool.draw_with_type(conf.main.batch_size, True, "train_g2t"))
-        # _data_t2g = list(pool.draw_with_type(conf.main.batch_size, True, "train_t2g"))
-        # data_list = list(zip(_data_g2t, _data_t2g))
-        # _data = data_list
-        # with tqdm(_data) as tqb:
-        #     for j, batch in enumerate(tqb):
-        for j, batch in enumerate(tqdm(dataloader_train)):
-            _loss1, _loss2, kld = supervise(
+        for j, batch in enumerate(tqdm(dataloader_train, desc=f"ep{i}")):
+            loss_t2g, loss_g2t, recon_loss, kl_div = supervise(
                 batch,
                 model_g2t,
                 model_t2g,
@@ -608,26 +285,21 @@ def train(conf, device, dataloader_train, dataloader_val, dataloader_test, vocab
                 optimizerT2G,
                 conf,
                 t2g_weight,
-                vocab,
                 device,
+                global_step,
             )
-            loss_t2g.append(_loss1)
             schedulerT2G.step()
-            loss_g2t.append(_loss2)
             schedulerG2T.step()
-            klds.append(kld)
             metrics = {
-                "train_loss_t2g": np.mean(loss_t2g),
-                "train_loss_g2t": np.mean(loss_g2t),
-                "train_kld": np.mean(klds),
+                "train_loss_t2g": loss_t2g,
+                "train_loss_g2t": loss_g2t,
+                "train_kl_div": kl_div,
+                "train_recon_loss": recon_loss,
             }
             mlflow.log_metrics(metrics, step=global_step)
             for k, v in metrics.items():
                 tb_writer.add_scalar(k, v, global_step=global_step)
-            # tqb.set_postfix(metrics)
             global_step += 1
-
-        logging.info("Epoch " + str(i))
 
         # validation step
         model_g2t.blind, model_t2g.blind = False, False
@@ -680,14 +352,7 @@ def main(timestamp: str):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # if not os.path.isfile("tmp_vocab.pt"):
-    #     vocab = prep_data(conf.main)
-    #     torch.save({"vocab": vocab}, "tmp_vocab.pt")
-
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
-    # mlflow.create_experiment(
-    #     "al.thomas_data_2_text", "hdfs://prod-am6/user/al.thomas/mlflow_artifacts"
-    # )
     mlflow.set_experiment("al.thomas_data_2_text")
     # todo: batch updates to speed up training
     #  https://www.mlflow.org/docs/latest/python_api/mlflow.tracking.html#mlflow.tracking.MlflowClient.log_batch

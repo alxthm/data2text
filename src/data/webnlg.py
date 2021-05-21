@@ -1,15 +1,12 @@
+import copy
 import json
-import logging
 import os
+import uuid
 from pathlib import Path
 from typing import List
 
-import torch
 import dgl
-import uuid
-import copy
-import random
-
+import torch
 from torch.utils.data import Dataset
 from transformers import BertTokenizer
 
@@ -282,19 +279,19 @@ def prepare_data(data_dir, device):
             int(0.95 * len(train_raw))
         ]
         train_raw = [x for x in train_raw if len(x["text"].split()) < max_len]
-        logging.info(f"max sequence length in training: {max_len}")
+        print(f"max sequence length in training: {max_len}")
 
         # download pre-trained tokenizer if not already available
         BertTokenizer.from_pretrained("bert-base-uncased")
 
         # build and save vocab
-        logging.info("Building vocab...")
+        print("Building vocab...")
         vocab = scan_data(train_raw)
         vocab = scan_data(val_raw, vocab)
         vocab = scan_data(test_raw, vocab, is_test=True)
         for k, v in vocab.items():
             v.build()
-            logging.info(f"Vocab {k}: size {len(v)}, only in test set {len(v.sp)}")
+            print(f"Vocab {k}: size {len(v)}, only in test set {len(v.sp)}")
         torch.save(vocab, vocab_path)
 
         # build and save datasets

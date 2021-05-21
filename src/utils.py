@@ -7,6 +7,9 @@ class WarningsFilter:
             stream: can be sys.stdout or sys.stderr for instance
         """
         self.stream = stream
+        # 21/05/20 20:19:06 WARN hdfs.DFSUtil: Namenode for yarn-experimental
+        # remains unresolved for ID 1.  Check your hdfs-site.xml file to ensure
+        # namenodes are configured properly.
         self.strings_to_filter = [
             "Check your hdfs-site.xml file",
             "pyarrow.hdfs.connect is deprecated",
@@ -23,4 +26,3 @@ class WarningsFilter:
 
     def flush(self):
         self.stream.flush()
-
