@@ -1,13 +1,21 @@
+from collections import defaultdict
+
+import mlflow
 import numpy as np
 import torch
+from pycocoevalcap.bleu.bleu import Bleu
+from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
+from sklearn.metrics import f1_score
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
 
-from src.data.webnlg import Vocab
+from src.data.webnlg import Vocab, write_txt
 from src.model.g2t import G2T
-from src.model.t2g import T2G
+from src.model.t2g import T2G, write_t2g_log
 
 
 class CycleCVAE(nn.Module):
@@ -36,6 +44,7 @@ class CycleCVAE(nn.Module):
         t2g_lr: float,
         t2g_weight_decay: float,
         gradient_clip_val: float,
+        run_name: str,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -49,6 +58,7 @@ class CycleCVAE(nn.Module):
         self.g2t_weight_decay = g2t_weight_decay
         self.beam_size = beam_size
         self.gradient_clip_val = gradient_clip_val
+        self.run_name = run_name
 
         # category weights: give less importance to more frequent relations
         t2g_weight = [rel_vocab.wf.get(x, 0) for x in rel_vocab.i2s]
@@ -79,6 +89,7 @@ class CycleCVAE(nn.Module):
             relation_types=len(rel_vocab), d_model=dim_h, dropout=t2g_drop
         )
 
+        # optimizers
         self.g2t_optimizer = torch.optim.Adam(
             self.g2t_model.parameters(),
             lr=self.g2t_lr,
@@ -102,10 +113,14 @@ class CycleCVAE(nn.Module):
             num_training_steps=800 * self.tot_epoch,
         )
 
+        # metrics
+        self.bleu = Bleu(4)
+        self.meteor = Meteor()
+        self.rouge = Rouge()
+        self.cider = Cider()
 
     def training_step(self, batch, global_step: int):
         # --- SUPERVISED
-        self.g2t_model.blind, self.t2g_model.blind = False, False  # not necessary
         self.train()
 
         # --- train t2g one step
@@ -146,18 +161,142 @@ class CycleCVAE(nn.Module):
             "train_kl_div": kl_div.item(),
         }
 
-    def validation_step(self, batch):
-        pass
-
-    def on_train_batch_end(self, tb_writer: SummaryWriter, global_step: int):
+    def on_train_step_end(self, tb_writer: SummaryWriter, global_step: int):
         # log histogram for weights and gradients
         if global_step % 50 == 0:
             for name, param in self.named_parameters():
                 tb_writer.add_histogram(name, param, global_step)
                 if param.requires_grad:
                     try:
-                        tb_writer.add_histogram(
-                            f"{name}_grad", param.grad, global_step
-                        )
+                        tb_writer.add_histogram(f"{name}_grad", param.grad, global_step)
                     except NotImplementedError:
                         print(f"[{global_step}] No gradient for param {name}")
+
+    def on_eval_epoch_start(self):
+        self.wf_t2g = open(f"/tmp/{self.run_name}_t2g_out.txt", "w", encoding="utf-8")
+        self.t2g_hyp = []
+        self.t2g_ref = []
+        self.t2g_pos_label = []
+        self.g2t_hyp = []
+        self.g2t_ref = []
+        self.g2t_same = []
+
+    def eval_step(self, batch):
+        batch_size = len(batch["original_ent_text"])
+
+        # t2g
+        pred = self.t2g_model(batch)
+        _pred = pred.view(-1, pred.shape[-1]).argmax(-1).cpu().long().tolist()
+        _gold = batch["t2g_tgt"].view(-1).cpu().long().tolist()
+        tpred = pred.argmax(-1).cpu().numpy()
+        tgold = batch["t2g_tgt"].cpu().numpy()
+        # save predictions as plain text
+        for j in range(batch_size):
+            ents = [
+                [y for y in self.ent_vocab(x) if y[0] != "<"]
+                for x in batch["original_ent_text"][j]
+            ]
+            self.wf_t2g.write("=====================\n")
+            self.wf_t2g.write("--- Predictions\n")
+            write_t2g_log(self.wf_t2g, self.rel_vocab, tpred[j], ents)
+            self.wf_t2g.write("--- Target\n")
+            write_t2g_log(self.wf_t2g, self.rel_vocab, tgold[j], ents)
+        # compute f1 metrics
+        pred, gold = [], []
+        for j in range(len(_gold)):
+            if (
+                _gold[j] > 0
+            ):  # ignore <PAD> -> todo: simply use ignore_index of F1 metric?
+                pred.append(_pred[j])
+                gold.append(_gold[j])
+        self.t2g_pos_label.extend([x for x in gold if x != 3])  # 3 is no relation
+        self.t2g_hyp.extend(pred)
+        self.t2g_ref.extend(gold)
+
+        # g2t
+        seq = self.g2t_model(batch, beam_size=self.beam_size)  # (bs, max_sent_len)
+        r = write_txt(batch, batch["g2t_tgt"], self.text_vocab)
+        h = write_txt(batch, seq, self.text_vocab)
+        self.g2t_same.extend(
+            [
+                str(batch["original_raw_relation"][i])
+                + str(batch["original_ent_text"][i])
+                for i in range(batch_size)
+            ]
+        )
+        # save text predictions for evaluation and logging at the end of val epoch
+        self.g2t_hyp.extend(h)
+        self.g2t_ref.extend(r)
+
+    def on_eval_epoch_end(self, tag: str, tb_writer: SummaryWriter, global_step: int):
+        # compute metrics over all validation batch and log results
+        self.wf_t2g.close()
+        pos_label = list(set(self.t2g_pos_label))
+        f1_micro = f1_score(
+            self.t2g_ref,
+            self.t2g_hyp,
+            average="micro",
+            labels=pos_label,
+            zero_division=0,
+        )
+        f1_macro = f1_score(
+            self.t2g_ref,
+            self.t2g_hyp,
+            average="macro",
+            labels=pos_label,
+            zero_division=0,
+        )
+        mlflow.log_artifact(
+            f"/tmp/{self.run_name}_t2g_out.txt", f"t2g_out/{global_step}"
+        )
+        mlflow.log_metrics(
+            {f"{tag}_f1_micro": f1_micro, f"{tag}_f1_macro": f1_macro}, step=global_step
+        )
+        tb_writer.add_scalar(f"{tag}_f1_micro", f1_micro, global_step=global_step)
+        tb_writer.add_scalar(f"{tag}_f1_macro", f1_macro, global_step=global_step)
+
+        # g2t - format predictions into text
+        unq_hyp = {}
+        unq_ref = defaultdict(list)
+        g2t_hyp = [x[0] for x in self.g2t_hyp]
+        g2t_ref = [x[0] for x in self.g2t_ref]
+        idxs, g2t_same = list(
+            zip(*sorted(enumerate(self.g2t_same), key=lambda x: x[1]))
+        )
+        ptr = 0
+        for i in range(len(g2t_hyp)):
+            if i > 0 and g2t_same[i] != g2t_same[i - 1]:
+                ptr += 1
+            unq_hyp[ptr] = g2t_hyp[idxs[i]]
+            unq_ref[ptr].append(g2t_ref[idxs[i]])
+        unq_hyp = sorted(unq_hyp.items(), key=lambda x: x[0])
+        unq_ref = sorted(unq_ref.items(), key=lambda x: x[0])
+        g2t_hyp = [x[1] for x in unq_hyp]
+        g2t_ref = [[x.lower() for x in y[1]] for y in unq_ref]
+
+        # log predictions
+        assert len(unq_ref) == len(unq_hyp)
+        with open(f"/tmp/{self.run_name}_g2t_out.txt", "w", encoding="utf-8") as wf_g2t:
+            for i in range(len(g2t_hyp)):
+                wf_g2t.write(
+                    f"{i}\n" f"pred: {str(g2t_hyp[i])}\n" f"tgt: {str(g2t_ref[i])}\n"
+                )
+        mlflow.log_artifact(
+            f"/tmp/{self.run_name}_g2t_out.txt", f"g2t_out/{global_step}"
+        )
+        # compute NLG metrics
+        g2t_hyp = dict(zip(range(len(g2t_hyp)), [[x.lower()] for x in g2t_hyp]))
+        g2t_ref = dict(zip(range(len(g2t_ref)), g2t_ref))
+        bleu_score = self.bleu.compute_score(g2t_ref, g2t_hyp)
+        metrics = {
+            f"{tag}_bleu_1": bleu_score[0][0],
+            f"{tag}_bleu_2": bleu_score[0][1],
+            f"{tag}_bleu_3": bleu_score[0][2],
+            f"{tag}_bleu_4": bleu_score[0][3],
+            f"{tag}_meteor": self.meteor.compute_score(g2t_ref, g2t_hyp)[0],
+            f"{tag}_rouge_l": (self.rouge.compute_score(g2t_ref, g2t_hyp)[0]),
+            f"{tag}_cider": self.cider.compute_score(g2t_ref, g2t_hyp)[0],
+        }
+        mlflow.log_metrics(metrics, step=global_step)
+        for k, v in metrics.items():
+            tb_writer.add_scalar(k, v, global_step=global_step)
