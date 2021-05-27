@@ -60,7 +60,7 @@ def mlflow_log_src_and_config(conf, project_dir: Path):
 
     # save source files
     for f in (project_dir / "src").rglob("*.py"):
-        mlflow.log_artifact(str(f.relative_to(project_dir)), f"code/{f}")
+        mlflow.log_artifact(str(f), f"code/{f.relative_to(project_dir)}")
 
 
 # from https://github.com/PyTorchLightning/pytorch-lightning/

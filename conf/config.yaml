@@ -1,11 +1,12 @@
-save_checkpoints: False
 grad_clip: 1.
 dim_h: 512
 epoch: 50
 seed: 654321
 batch_size: 32
 mode: "sup" #['sup', 'cold_unsup', 'warm_unsup']
-
+log_every_n_steps: 50
+log_gradients: False
+save_checkpoints: False
 g2t:
     dim_z: 10
     n_head: 4 # number of attention heads

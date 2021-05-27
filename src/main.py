@@ -32,8 +32,6 @@ def main(timestamp: str):
 
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
     mlflow.set_experiment("al.thomas_data_2_text")
-    # todo: batch updates to speed up training
-    #  https://www.mlflow.org/docs/latest/python_api/mlflow.tracking.html#mlflow.tracking.MlflowClient.log_batch
     run_name = f"{timestamp}-{conf.mode}"
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
     print(f"run_name: {run_name}\n")
@@ -99,10 +97,14 @@ def main(timestamp: str):
             # training epoch
             for batch in tqdm(dataloader_train, desc=f"[train][ep{ep}]"):
                 metrics = model.training_step(batch, global_step=global_step)
-                model.on_train_step_end(tb_writer, global_step)
-                mlflow.log_metrics(metrics, step=global_step)
-                for k, v in metrics.items():
-                    tb_writer.add_scalar(k, v, global_step=global_step)
+
+                # log metrics
+                if global_step % conf.log_every_n_steps == 0:
+                    mlflow.log_metrics(metrics, step=global_step)
+                    for k, v in metrics.items():
+                        tb_writer.add_scalar(k, v, global_step=global_step)
+                    if conf.log_gradients:
+                        model.log_gradients(tb_writer, global_step, print_warning=True)
                 global_step += 1
 
             # validation epoch

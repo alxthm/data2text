@@ -161,17 +161,6 @@ class CycleCVAE(nn.Module):
             "train_kl_div": kl_div.item(),
         }
 
-    def on_train_step_end(self, tb_writer: SummaryWriter, global_step: int):
-        # log histogram for weights and gradients
-        if global_step % 50 == 0:
-            for name, param in self.named_parameters():
-                tb_writer.add_histogram(name, param, global_step)
-                if param.requires_grad:
-                    try:
-                        tb_writer.add_histogram(f"{name}_grad", param.grad, global_step)
-                    except NotImplementedError:
-                        print(f"[{global_step}] No gradient for param {name}")
-
     def on_eval_epoch_start(self):
         self.wf_t2g = open(f"/tmp/{self.run_name}_t2g_out.txt", "w", encoding="utf-8")
         self.t2g_hyp = []
@@ -300,3 +289,16 @@ class CycleCVAE(nn.Module):
         mlflow.log_metrics(metrics, step=global_step)
         for k, v in metrics.items():
             tb_writer.add_scalar(k, v, global_step=global_step)
+
+    def log_gradients(
+        self, tb_writer: SummaryWriter, global_step: int, print_warning: bool
+    ):
+        # log histogram for weights and gradients
+        for name, param in self.named_parameters():
+            tb_writer.add_histogram(name, param, global_step)
+            if param.requires_grad:
+                try:
+                    tb_writer.add_histogram(f"{name}_grad", param.grad, global_step)
+                except NotImplementedError:
+                    if print_warning:
+                        print(f"[{global_step}] No gradient for param {name}")
