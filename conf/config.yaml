@@ -1,10 +1,17 @@
+save_checkpoints: False
+grad_clip: 1.
+dim_h: 512
+epoch: 50
+seed: 654321
+batch_size: 32
+mode: "sup" #['sup', 'cold_unsup', 'warm_unsup']
+
 g2t:
-    vae_dim: 10
-    nhead: 4 # number of attention heads
+    dim_z: 10
+    n_head: 4 # number of attention heads
     head_dim: 128 # dim of each attention head
     weight_decay: 0.0
     n_layers_gat: 2
-    batch_size: 32
     beam_size: 5
     beam_max_len: 50
     enc_lstm_layers: 2
@@ -14,15 +21,6 @@ g2t:
     drop: 0.1 # FFN dropout
     length_penalty: 1.0
 t2g:
-    batch_size: 32
     lr: 5.0e-5
     drop: 0.0
     weight_decay: 0.0
-main:
-    save_checkpoints: False
-    grad_clip: 1.
-    dim_h: 512
-    epoch: 50
-    seed: 654321
-    batch_size: 32
-    mode: "sup" #['sup', 'cold_unsup', 'warm_unsup']
