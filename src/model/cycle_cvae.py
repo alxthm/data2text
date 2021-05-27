@@ -1,4 +1,5 @@
 from collections import defaultdict
+from typing import List
 
 import mlflow
 import numpy as np
@@ -15,7 +16,7 @@ import torch.nn.functional as F
 
 from src.data.webnlg import Vocab, write_txt
 from src.model.g2t import G2T
-from src.model.t2g import T2G, write_t2g_log
+from src.model.t2g import T2G
 
 
 class CycleCVAE(nn.Module):
@@ -165,7 +166,6 @@ class CycleCVAE(nn.Module):
         self.wf_t2g = open(f"/tmp/{self.run_name}_t2g_out.txt", "w", encoding="utf-8")
         self.t2g_hyp = []
         self.t2g_ref = []
-        self.t2g_pos_label = []
         self.g2t_hyp = []
         self.g2t_ref = []
         self.g2t_same = []
@@ -174,65 +174,53 @@ class CycleCVAE(nn.Module):
         batch_size = len(batch["original_ent_text"])
 
         # t2g
-        pred = self.t2g_model(batch)
-        _pred = pred.view(-1, pred.shape[-1]).argmax(-1).cpu().long().tolist()
-        _gold = batch["t2g_tgt"].view(-1).cpu().long().tolist()
-        tpred = pred.argmax(-1).cpu().numpy()
-        tgold = batch["t2g_tgt"].cpu().numpy()
-        # save predictions as plain text
-        for j in range(batch_size):
-            ents = [
-                [y for y in self.ent_vocab(x) if y[0] != "<"]
-                for x in batch["original_ent_text"][j]
-            ]
-            self.wf_t2g.write("=====================\n")
-            self.wf_t2g.write("--- Predictions\n")
-            write_t2g_log(self.wf_t2g, self.rel_vocab, tpred[j], ents)
-            self.wf_t2g.write("--- Target\n")
-            write_t2g_log(self.wf_t2g, self.rel_vocab, tgold[j], ents)
-        # compute f1 metrics
-        pred, gold = [], []
-        for j in range(len(_gold)):
-            if (
-                _gold[j] > 0
-            ):  # ignore <PAD> -> todo: simply use ignore_index of F1 metric?
-                pred.append(_pred[j])
-                gold.append(_gold[j])
-        self.t2g_pos_label.extend([x for x in gold if x != 3])  # 3 is no relation
-        self.t2g_hyp.extend(pred)
-        self.t2g_ref.extend(gold)
+        t2g_logits = self.t2g_model(batch)  # (bs, ne, ne, num_relations)
+        num_relations = t2g_logits.shape[-1]
+        self.wf_t2g.write(
+            self.graph_preds_as_str(
+                t2g_logits, batch["t2g_tgt"], batch["original_ent_text"]
+            )
+        )
+        # save predictions to later compute f1 metrics
+        self.t2g_hyp.append(t2g_logits.view(-1, num_relations).argmax(-1).cpu())
+        self.t2g_ref.append(batch["t2g_tgt"].view(-1).cpu())
 
         # g2t
         seq = self.g2t_model(batch, beam_size=self.beam_size)  # (bs, max_sent_len)
         r = write_txt(batch, batch["g2t_tgt"], self.text_vocab)
         h = write_txt(batch, seq, self.text_vocab)
-        self.g2t_same.extend(
-            [
-                str(batch["original_raw_relation"][i])
-                + str(batch["original_ent_text"][i])
-                for i in range(batch_size)
-            ]
-        )
+        self.g2t_same += [
+            str(batch["original_raw_relation"][i]) + str(batch["original_ent_text"][i])
+            for i in range(batch_size)
+        ]
+
         # save text predictions for evaluation and logging at the end of val epoch
-        self.g2t_hyp.extend(h)
-        self.g2t_ref.extend(r)
+        self.g2t_hyp += h
+        self.g2t_ref += r
 
     def on_eval_epoch_end(self, tag: str, tb_writer: SummaryWriter, global_step: int):
         # compute metrics over all validation batch and log results
         self.wf_t2g.close()
-        pos_label = list(set(self.t2g_pos_label))
+        preds = torch.cat(self.t2g_hyp, dim=0).numpy()
+        target = torch.cat(self.t2g_ref, dim=0).numpy()
+        # labels that we want to consider
+        # (ignore targets that correspond to padding (PAD_ID=0) or no relation (UNK_ID=3))
+        labels = list(set(target.tolist()))
+        labels = [x for x in labels if x not in [0, 3]]
+        # micro: f1 score of all predictions, no matter the label
         f1_micro = f1_score(
-            self.t2g_ref,
-            self.t2g_hyp,
+            preds,
+            target,
             average="micro",
-            labels=pos_label,
+            labels=labels,
             zero_division=0,
         )
+        # macro: average of f1 scores for all labels
         f1_macro = f1_score(
-            self.t2g_ref,
-            self.t2g_hyp,
+            preds,
+            target,
             average="macro",
-            labels=pos_label,
+            labels=labels,
             zero_division=0,
         )
         mlflow.log_artifact(
@@ -302,3 +290,54 @@ class CycleCVAE(nn.Module):
                 except NotImplementedError:
                     if print_warning:
                         print(f"[{global_step}] No gradient for param {name}")
+
+    def graph_preds_as_str(
+        self, pred: torch.FloatTensor, target: torch.LongTensor, original_ent_text
+    ):
+        """
+
+        Args:
+            pred: logits, shape (bs, ne, ne, num_rel) where ne is the max number
+                of entities in a batch sentence
+            target: shape (bs, ne, ne)
+
+        Returns:
+
+        """
+        batch_size, _, _, _ = pred.shape
+        tpred = pred.argmax(-1).cpu().numpy()
+        tgold = target.cpu().numpy()
+        s = ""
+
+        def graph_as_str(relations: np.array, ents: List[List]):
+            """
+            Write a predicted graph as plain text to the logging file
+
+            Args:
+                relations: numpy array of shape (max_num_ent, max_num_ent).
+                    Contains the indices of relations between entities.
+                ents: list of entities for this example, each entity being a list of tokens
+
+            """
+            rels = []
+            for e1 in range(len(ents)):
+                for e2 in range(len(ents)):
+                    # 0: padding, 3: unknown
+                    if relations[e1, e2] != 3 and relations[e1, e2] != 0:
+                        rels.append((e1, int(relations[e1, e2]), e2))
+            linearized_graph = [
+                (ents[e1], self.rel_vocab(r), ents[e2]) for e1, r, e2 in rels
+            ]
+            return f"{str(linearized_graph)}\n"
+
+        for j in range(batch_size):
+            ents = [
+                [y for y in self.ent_vocab(x) if y[0] != "<"]
+                for x in original_ent_text[j]
+            ]
+            s += "=====================\n"
+            s += "--- Predictions\n"
+            s += graph_as_str(relations=tpred[j], ents=ents)
+            s += "--- Target\n"
+            s += graph_as_str(relations=tgold[j], ents=ents)
+        return s
