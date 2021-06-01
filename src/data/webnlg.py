@@ -16,6 +16,53 @@ tokenizer = BertTokenizer.from_pretrained(bert_type)
 NODE_TYPE = {"entity": 0, "root": 1, "relation": 2}
 
 
+class Example(object):
+    def __init__(self, data, vocab):
+        self.uuid = uuid.uuid4()
+        self.vocab = vocab
+        self.text = [vocab["text"](x) for x in data["text"].split()]
+        self.entities = [vocab["entity"](x) for x in data["entities"]]
+        self.relations = []
+        for r in data["relations"]:
+            e1, e2 = vocab["entity"](r[0]), vocab["entity"](r[2])
+            rel = vocab["relation"](r[1])
+            e1, e2 = self.entities.index(e1), self.entities.index(e2)
+            self.relations.append([e1, rel, e2])
+
+        self.graph = None
+        self.graph = build_graph(len(self.entities), self.relations)
+        self.id = None
+
+    def __str__(self):
+        return "\n".join([str(k) + ":\t" + str(v) for k, v in self.__dict__.items()])
+
+    def __len__(self):
+        return len(self.text)
+
+    def get(self):
+        if hasattr(self, "_cached_tensor") and False:
+            return self._cached_tensor
+        else:
+            vocab = self.vocab
+            ret = {}
+            ret["text"] = (
+                [vocab["text"]("<BOS>")] + self.text + [vocab["text"]("<EOS>")]
+            )
+            ret["ent_text"] = [
+                [vocab["entity"]("<BOS>")] + x + [vocab["entity"]("<EOS>")]
+                for x in self.entities
+            ]
+            ret["relation"] = [vocab["relation"]("<ROOT>")] + sum(
+                [[x[1], vocab["relation"].get_inv(x[1])] for x in self.relations], []
+            )
+            ret["raw_relation"] = self.relations
+            ret["graph"] = self.graph
+            ret["uuid"] = self.uuid
+
+            self._cached_tensor = ret
+            return self._cached_tensor
+
+
 class Vocab(object):
     def __init__(
         self,
@@ -84,159 +131,50 @@ class Vocab(object):
             return self.s2i.get(x, self.s2i["<UNK>"])
 
 
-class Collator:
-    def __init__(self, ent_vocab: Vocab, text_vocab: Vocab, tokenizer, device):
+class WebNLGCollator:
+    def __init__(
+        self, ent_vocab: Vocab, text_vocab: Vocab, tokenizer, device, is_eval: bool
+    ):
         self.ent_vocab = ent_vocab
         self.text_vocab = text_vocab
         self.tokenizer = tokenizer
         self.device = device
+        self.is_eval = is_eval
 
     def __call__(self, batch: List):
-        ret = {}
-        # original raw batch (needed for logging)
-        ret["original_ent_text"] = [x["ent_text"] for x in batch]
-        ret["original_raw_relation"] = [x["raw_relation"] for x in batch]
-
-        # g2t batch
-        ret["g2t_ent_len"] = [len(x["ent_text"]) for x in batch]
-        # list of length bs, with list of sentence entities tokenized
-        # (bs, num_ent_i, ent_len_ij)
-        ents = [self.ent_vocab(x["ent_text"]) for x in batch]
-        ret["g2t_raw_ent_text"] = ents
-        # (bs, max_sentence_len)
-        ret["g2t_text"] = pad(
-            [torch.LongTensor(x["text"]) for x in batch], "tensor"
-        ).to(self.device)
-        # (bs, max_sentence_len - 1)
-        ret["g2t_tgt"] = ret["g2t_text"][:, 1:]
-        ret["g2t_text"] = ret["g2t_text"][:, :-1]
-        # flattened list of entity token indices tensors
-        # (size sum(num_ent_i), for every batch element and for every
-        #  entity in the sentence)
-        ent_text = sum(
-            [[torch.LongTensor(y) for y in x["ent_text"]] for x in batch], []
-        )
-        # size (sum(num_ent_i), max_entity_len)
-        ret["g2t_ent_text"] = pad(ent_text, "tensor").to(self.device)
-        # size (bs, max_num_rel)
-        ret["g2t_rel"] = pad(
-            [torch.LongTensor(x["relation"]) for x in batch], "tensor"
-        ).to(self.device)
-        ret["g2t_graph"] = dgl.batch([x["graph"] for x in batch]).to(self.device)
-
-        # t2g batch
-        ent_pos = []
-        text = []
-        tgt = []
-        MAX_ENT = 100
-        ent_len = 1
-        for data in batch:
-            ents = [self.ent_vocab(x) for x in data["ent_text"]]
-            st, ed = [], []
-            cstr = ""
-            ent_order = []
-            for i, t in enumerate(
-                data["text"]
-            ):  # t: token id of each word in the data["text"] sentence
-                if t >= len(self.text_vocab):
-                    # if t is the id of an entity token ("ENT_0", ...):
-                    #   - add the entity text to cstr (without '<BOS>', '<EOS>' tokens)
-                    #   - add to st and ed the indices of start and end characters
-                    #       (in sentence cstr), for every entity
-                    ff = (
-                        t - len(self.text_vocab)
-                    ) not in ent_order  # t - len(self.text_vocab) = entity number
-                    if ff:
-                        st.append(len(cstr))
-                    cstr += " ".join(
-                        [
-                            x
-                            for x in self.text_vocab(t, ents)
-                            if x[0] != "<" and x[-1] != ">"
-                        ]
-                    )
-                    if ff:
-                        ent_order.append(
-                            t - len(self.text_vocab)
-                        )  # register entities in the order they appear
-                        ed.append(len(cstr))
-                else:
-                    if self.text_vocab(t)[0] == "<":
-                        continue
-                    cstr += self.text_vocab(t)
-                cstr += "" if i == len(data["text"]) - 1 else " "
-            # never used?
-            # if add_inp:
-            #     cstr += " " + " ".join([" ".join(e) for e in ents])
-            tok_abs = ["[CLS]"] + self.tokenizer.tokenize(cstr) + ["[SEP]"]
-            _ent_pos = []
-            for s, e in zip(st, ed):
-                # from start/end indices of entities (s,e) in cstr, find new_s, new_e
-                # the start/end indices of entities in tok_abs, the tokenized version of cstr
-                guess_start = s - cstr[:s].count(" ") + 5  # ??
-                guess_end = e - cstr[:e].count(" ") + 5
-
-                new_s = -1
-                new_e = -1
-                l = 0
-                r = 0
-                for i in range(len(tok_abs)):
-                    # l, r: start/end indices of the text representation of tok_abs[i] in cstr
-                    l = r
-                    r = l + len(tok_abs[i]) - tok_abs[i].count("##") * 2
-                    if l <= guess_start and guess_start < r:
-                        new_s = i
-                    if l <= guess_end and guess_end < r:
-                        new_e = i
-                _ent_pos.append((new_s, new_e))
-            # order the list _ent_pos (start/end indices of every entity in tok_abs)
-            # so they are in the order of entity number (ENT_0, ENT_1, etc)
-            # instead of the order they appear in the sentence
-            _order_ent_pos = []
-            for _e in range(len(ents)):
-                if (
-                    _e in ent_order
-                ):  # ent_order = [1, 0, 2] if text = "ENT_1 blabla ENT_0 blabla ENT_2"
-                    idx = ent_order.index(_e)
-                    _order_ent_pos.append(_ent_pos[idx])
-                else:
-                    idx = 0
-                    _order_ent_pos.append((0, 1))
-
-            ent_pos.append(_order_ent_pos)
-            text.append(self.tokenizer.convert_tokens_to_ids(tok_abs))
-            _tgt = torch.zeros(
-                MAX_ENT, MAX_ENT
-            )  # 0: <PAD> (in all vocabs, including vocab["relation"])
-            _tgt[: len(_ent_pos), : len(_ent_pos)] += 3  # 3: <UNK>
-            for _e1, _r, _e2 in data["raw_relation"]:
-                if (
-                    _e1 not in ent_order or _e2 not in ent_order
-                ):  # the synthetic data may lose some entities
-                    continue
-                _tgt[_e1, _e2] = _r
-            tgt.append(_tgt)
-            ent_len = max(ent_len, len(_order_ent_pos))
-        # indices of bert tokens for the full sentences (entities as plain text), padded
-        ret["t2g_sents"] = pad([torch.LongTensor(x) for x in text], "tensor").to(
-            self.device
-        )
-        # for every sentence of the batch, list of start/end indices for ENT_0, ENT_1, etc
-        # (in tokenized sentence)
-        ret["t2g_ents"] = ent_pos
-        # shape (batch_size, max_ent_len, max_ent_len) - indexes of relations between
-        # each entities i, j
-        # (0 if there is no ENT_i or ENT_j in the data sample, 3 if there is no relation
-        # between ENT_i and ENT_j)
-        ret["t2g_tgt"] = (
-            torch.stack(tgt, 0)[:, :ent_len, :ent_len].long().to(self.device)
-        )
-        return ret
+        if self.is_eval:
+            # original raw batch (needed for logging)
+            batch_raw = {
+                "ent_text": [x["ent_text"] for x in batch],
+                "raw_relation": [x["raw_relation"] for x in batch],
+            }
+            batch_t2g = get_t2g_batch(
+                batch, self.ent_vocab, self.text_vocab, self.device
+            )
+            batch_g2t = get_g2t_batch(batch, self.ent_vocab, self.device)
+            return batch_raw, batch_t2g, batch_g2t
+        else:
+            return batch
 
 
 class WebNLGDataset(Dataset):
-    def __init__(self, file_path: Path):
-        self.data: List[Example] = torch.load(file_path)
+    def __init__(self, file_path: Path, mode: str):
+        """
+
+        Args:
+            file_path: Path to the list of examples
+            mode: Can be 'text_only', 'graph_only' or 'both'.
+                If graph_only, the text will be removed to ensure to information leak
+                If text_only, the graph will me removed
+        """
+        self.data: List[dict] = torch.load(file_path)
+        if mode == "graph_only":
+            for i in range(len(self.data)):
+                self.data[i]["text"] = []
+        elif mode == "text_only":
+            for i in range(len(self.data)):
+                # todo: ok to remove 'graph' as well?
+                self.data[i]["relations"] = []
 
     def __len__(self):
         return len(self.data)
@@ -245,17 +183,181 @@ class WebNLGDataset(Dataset):
         return self.data[index]
 
 
-def prepare_data(data_dir, device):
+def get_t2g_batch(batch: List, ent_vocab: Vocab, text_vocab: Vocab, device):
     """
-    Return train, val, test datasets from processed data.
+    Takes (x,y) from a list of data examples and return a batch of transformed (x,y) where
+        - x: 'sents' and 'ents' are computed using 'text', 'ent_text'
+        - y: 'tgt' is computed using this and 'raw_relation'
 
+    Args:
+        batch: List of data examples
+        ent_vocab:
+        text_vocab:
+        device:
+
+    Returns:
+
+    """
+    ent_pos = []
+    text = []
+    tgt = []
+    MAX_ENT = 100
+    ent_len = 1
+    for data in batch:
+        ents = [ent_vocab(x) for x in data["ent_text"]]
+        st, ed = [], []
+        cstr = ""
+        ent_order = []
+        for i, t in enumerate(
+            data["text"]
+        ):  # t: token id of each word in the data["text"] sentence
+            if t >= len(text_vocab):
+                # if t is the id of an entity token ("ENT_0", ...):
+                #   - add the entity text to cstr (without '<BOS>', '<EOS>' tokens)
+                #   - add to st and ed the indices of start and end characters
+                #       (in sentence cstr), for every entity
+                ff = (
+                    t - len(text_vocab)
+                ) not in ent_order  # t - len(text_vocab) = entity number
+                if ff:
+                    st.append(len(cstr))
+                cstr += " ".join(
+                    [x for x in text_vocab(t, ents) if x[0] != "<" and x[-1] != ">"]
+                )
+                if ff:
+                    ent_order.append(
+                        t - len(text_vocab)
+                    )  # register entities in the order they appear
+                    ed.append(len(cstr))
+            else:
+                if text_vocab(t)[0] == "<":
+                    continue
+                cstr += text_vocab(t)
+            cstr += "" if i == len(data["text"]) - 1 else " "
+        # never used?
+        # if add_inp:
+        #     cstr += " " + " ".join([" ".join(e) for e in ents])
+        tok_abs = ["[CLS]"] + tokenizer.tokenize(cstr) + ["[SEP]"]
+        _ent_pos = []
+        for s, e in zip(st, ed):
+            # from start/end indices of entities (s,e) in cstr, find new_s, new_e
+            # the start/end indices of entities in tok_abs, the tokenized version of cstr
+            guess_start = s - cstr[:s].count(" ") + 5  # ??
+            guess_end = e - cstr[:e].count(" ") + 5
+
+            new_s = -1
+            new_e = -1
+            l = 0
+            r = 0
+            for i in range(len(tok_abs)):
+                # l, r: start/end indices of the text representation of tok_abs[i] in cstr
+                l = r
+                r = l + len(tok_abs[i]) - tok_abs[i].count("##") * 2
+                if l <= guess_start and guess_start < r:
+                    new_s = i
+                if l <= guess_end and guess_end < r:
+                    new_e = i
+            _ent_pos.append((new_s, new_e))
+        # order the list _ent_pos (start/end indices of every entity in tok_abs)
+        # so they are in the order of entity number (ENT_0, ENT_1, etc)
+        # instead of the order they appear in the sentence
+        _order_ent_pos = []
+        for _e in range(len(ents)):
+            if (
+                _e in ent_order
+            ):  # ent_order = [1, 0, 2] if text = "ENT_1 blabla ENT_0 blabla ENT_2"
+                idx = ent_order.index(_e)
+                _order_ent_pos.append(_ent_pos[idx])
+            else:
+                idx = 0
+                _order_ent_pos.append((0, 1))
+
+        ent_pos.append(_order_ent_pos)
+        text.append(tokenizer.convert_tokens_to_ids(tok_abs))
+        _tgt = torch.zeros(
+            MAX_ENT, MAX_ENT
+        )  # 0: <PAD> (in all vocabs, including vocab["relation"])
+        _tgt[: len(_ent_pos), : len(_ent_pos)] += 3  # 3: <UNK>
+        for _e1, _r, _e2 in data["raw_relation"]:
+            if (
+                _e1 not in ent_order or _e2 not in ent_order
+            ):  # the synthetic data may lose some entities
+                continue
+            _tgt[_e1, _e2] = _r
+        tgt.append(_tgt)
+        ent_len = max(ent_len, len(_order_ent_pos))
+    batch_t2g = {
+        # indices of bert tokens for the full sentences (entities as plain text), padded
+        "sents": pad([torch.LongTensor(x) for x in text], "tensor").to(device),
+        # for every sentence of the batch, list of start/end indices for ENT_0, ENT_1, etc
+        # (in tokenized sentence)
+        "ents": ent_pos,
+        # shape (batch_size, max_ent_len, max_ent_len) - indexes of relations between
+        # each entities i, j
+        # (0 if there is no ENT_i or ENT_j in the data sample, 3 if there is no relation
+        # between ENT_i and ENT_j)
+        "tgt": torch.stack(tgt, 0)[:, :ent_len, :ent_len].long().to(device),
+    }
+    return batch_t2g
+
+
+def get_g2t_batch(raw_batch: List, ent_vocab: Vocab, device):
+    """
+    Take (x,y) from a list of data examples and return a batch of transformed (x,y), where
+        - y: 'ent_len', 'raw_ent_len', 'ent_text', 'rel', 'graph' are computed
+        using 'ent_text', 'relation' and 'graph'
+        - x: 'tgt' and 'text' are computed using 'text'
+
+    Args:
+        raw_batch: List of data examples.
+        ent_vocab:
+        device:
+
+    Returns:
+
+    """
+    # list of length bs, with list of sentence entities tokenized
+    # (bs, num_ent_i, ent_len_ij)
+    ents = [ent_vocab(x["ent_text"]) for x in raw_batch]
+    # size (bs, max_num_rel)
+    rel = pad([torch.LongTensor(x["relation"]) for x in raw_batch], "tensor").to(device)
+    # flattened list of entity token indices tensors
+    # (size sum(num_ent_i), for every batch element and for every
+    #  entity in the sentence)
+    ent_text = sum(
+        [[torch.LongTensor(y) for y in x["ent_text"]] for x in raw_batch], []
+    )
+    # (bs, max_sentence_len)
+    text = pad([torch.LongTensor(x["text"]) for x in raw_batch], "tensor").to(device)
+    batch_g2t = {
+        # -- y
+        "ent_len": [len(x["ent_text"]) for x in raw_batch],
+        "raw_ent_text": ents,
+        # size (sum(num_ent_i), max_entity_len)
+        "ent_text": pad(ent_text, "tensor").to(device),
+        "rel": rel,
+        "graph": dgl.batch([x["graph"] for x in raw_batch]).to(device),
+        # -- x
+        "tgt": text[:, 1:],  # (bs, max_sentence_len - 1)
+        "text": text[:, :-1],
+    }
+    return batch_g2t
+
+
+def prepare_data(data_dir, device, mode: str):
+    """
     If processed data is not found in `data/processed`:
         - load the files in `data/raw`
         - build and save the vocabulary (for text, entities and relations)
         - build and save the processed data (for train, val, test)
 
-    Returns:
+    Args:
+        data_dir:
+        device:
+        mode: 'sup' or 'unsup'
 
+    Returns:
+        train, val, test datasets from processed data.
     """
     dataset_train_path = data_dir / "processed/webnlg/train.data"
     dataset_val_path = data_dir / "processed/webnlg/val.data"
@@ -295,7 +397,6 @@ def prepare_data(data_dir, device):
         torch.save(vocab, vocab_path)
 
         # build and save datasets
-        # todo: for unsupervised, define t2g and g2t datasets without rel/text
         train_data = [Example(x, vocab).get() for x in train_raw]
         val_data = [Example(x, vocab).get() for x in val_raw]
         test_data = [Example(x, vocab).get() for x in test_raw]
@@ -303,20 +404,46 @@ def prepare_data(data_dir, device):
         torch.save(val_data, dataset_val_path)
         torch.save(test_data, dataset_test_path)
 
-    dataset_train = WebNLGDataset(dataset_train_path)
-    dataset_val = WebNLGDataset(dataset_val_path)
-    dataset_test = WebNLGDataset(dataset_test_path)
+    if mode == "sup":
+        dataset_train_t2g = WebNLGDataset(dataset_train_path, mode="both")
+        dataset_train_g2t = WebNLGDataset(dataset_train_path, mode="both")
+    elif mode == "unsup":
+        dataset_train_t2g = WebNLGDataset(dataset_train_path, mode="graph_only")
+        dataset_train_g2t = WebNLGDataset(dataset_train_path, mode="text_only")
+    else:
+        raise ValueError
+    dataset_val = WebNLGDataset(dataset_val_path, mode="both")
+    dataset_test = WebNLGDataset(dataset_test_path, mode="both")
 
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
     vocab = torch.load(vocab_path)
     text_vocab = vocab["text"]
     ent_vocab = vocab["entity"]
     rel_vocab = vocab["relation"]
-    collate_fn = Collator(
-        ent_vocab=ent_vocab, text_vocab=text_vocab, tokenizer=tokenizer, device=device
+    collate_fn_train = WebNLGCollator(
+        ent_vocab=ent_vocab,
+        text_vocab=text_vocab,
+        tokenizer=tokenizer,
+        device=device,
+        is_eval=False,
+    )
+    collate_fn_eval = WebNLGCollator(
+        ent_vocab=ent_vocab,
+        text_vocab=text_vocab,
+        tokenizer=tokenizer,
+        device=device,
+        is_eval=True,
     )
 
-    return dataset_train, dataset_val, dataset_test, vocab, collate_fn
+    return (
+        dataset_train_t2g,
+        dataset_train_g2t,
+        dataset_val,
+        dataset_test,
+        vocab,
+        collate_fn_train,
+        collate_fn_eval,
+    )
 
 
 def pad(var_len_list, out_type="list", flatten=False):
@@ -368,13 +495,13 @@ def pad(var_len_list, out_type="list", flatten=False):
             )
 
 
-def write_txt(batch, seqs, text_vocab):
+def write_txt(raw_ent_text, seqs, text_vocab):
     """
 
     Convert the prediction to real text.
 
     Args:
-        batch: g2t_batch
+        raw_ent_text:
         seqs: (bs, max_sent_len) tensor of predicted tokens (words+entities)
         text_vocab:
 
@@ -390,11 +517,11 @@ def write_txt(batch, seqs, text_vocab):
         for token in seq:
             # copy the entity
             if token >= len(text_vocab):
-                if (token - len(text_vocab)) >= len(batch["g2t_raw_ent_text"][b]):
-                    print((token - len(text_vocab)), len(batch["g2t_raw_ent_text"][b]))
+                if (token - len(text_vocab)) >= len(raw_ent_text[b]):
+                    print((token - len(text_vocab)), len(raw_ent_text[b]))
                     tok = ["NO_ENT"]
                 else:
-                    tok = batch["g2t_raw_ent_text"][b][token - len(text_vocab)]
+                    tok = raw_ent_text[b][token - len(text_vocab)]
                     # tok = ['ENT_'+str(int(token-len(text_vocab)))+'_ENT']
                 ent_text = tok
                 ent_text = filter(lambda x: x != "<PAD>", ent_text)
@@ -470,51 +597,3 @@ def build_graph(ent_len, relations):
 
     graph = get_graph(ent_len, rel_len, adj_edges)
     return graph
-
-
-class Example(object):
-    def __init__(self, data, vocab):
-        self.uuid = uuid.uuid4()
-        self.vocab = vocab
-        self.text = [vocab["text"](x) for x in data["text"].split()]
-        self.entities = [vocab["entity"](x) for x in data["entities"]]
-        self.relations = []
-        for r in data["relations"]:
-            e1, e2 = vocab["entity"](r[0]), vocab["entity"](r[2])
-            rel = vocab["relation"](r[1])
-            e1, e2 = self.entities.index(e1), self.entities.index(e2)
-            self.relations.append([e1, rel, e2])
-
-        self.graph = None
-        self.graph = build_graph(len(self.entities), self.relations)
-        self.id = None
-
-    def __str__(self):
-        return "\n".join([str(k) + ":\t" + str(v) for k, v in self.__dict__.items()])
-
-    def __len__(self):
-        return len(self.text)
-
-    def get(self):
-        if hasattr(self, "_cached_tensor") and False:
-            return self._cached_tensor
-        else:
-            vocab = self.vocab
-            ret = {}
-            ret["text"] = (
-                [vocab["text"]("<BOS>")] + self.text + [vocab["text"]("<EOS>")]
-            )
-            ret["ent_text"] = [
-                [vocab["entity"]("<BOS>")] + x + [vocab["entity"]("<EOS>")]
-                for x in self.entities
-            ]
-            ret["relation"] = [vocab["relation"]("<ROOT>")] + sum(
-                [[x[1], vocab["relation"].get_inv(x[1])] for x in self.relations], []
-            )
-            ret["raw_relation"] = self.relations
-            ret["graph"] = self.graph
-            ret["uuid"] = self.uuid
-
-            self._cached_tensor = ret
-            return self._cached_tensor
-

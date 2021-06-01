@@ -40,24 +40,36 @@ def main(timestamp: str):
         mlflow_log_src_and_config(conf, project_dir)
 
         # load data
-        dataset_train, dataset_val, dataset_test, vocab, collate_fn = prepare_data(
-            data_dir=project_dir / "data", device=device
-        )
-        dataloader_train = DataLoader(
-            dataset_train,
+        (
+            dataset_train_t2g,
+            dataset_train_g2t,
+            dataset_val,
+            dataset_test,
+            vocab,
+            collate_fn_train,
+            collate_fn_eval,
+        ) = prepare_data(data_dir=project_dir / "data", device=device, mode=conf.mode)
+        dataloader_train_t2g = DataLoader(
+            dataset_train_t2g,
             batch_size=conf.batch_size,
             shuffle=True,
-            collate_fn=collate_fn,
+            collate_fn=collate_fn_train,
+        )
+        dataloader_train_g2t = DataLoader(
+            dataset_train_g2t,
+            batch_size=conf.batch_size,
+            shuffle=True,
+            collate_fn=collate_fn_train,
         )
         dataloader_val = DataLoader(
             dataset_val,
             batch_size=conf.batch_size,
-            collate_fn=collate_fn,
+            collate_fn=collate_fn_eval,
         )
         dataloader_test = DataLoader(
             dataset_test,
             batch_size=conf.batch_size,
-            collate_fn=collate_fn,
+            collate_fn=collate_fn_eval,
         )
 
         # prepare model
@@ -86,6 +98,7 @@ def main(timestamp: str):
             t2g_weight_decay=conf.t2g.weight_decay,
             gradient_clip_val=conf.grad_clip,
             run_name=run_name,
+            device=device,
         )
         model.to(device)
         summary = ModelSummary(model, mode="top")
@@ -95,8 +108,12 @@ def main(timestamp: str):
         global_step = 0
         for ep in range(0, conf.epoch):
             # training epoch
-            for batch in tqdm(dataloader_train, desc=f"[train][ep{ep}]"):
-                metrics = model.training_step(batch, global_step=global_step)
+            for batch_t2g, batch_g2t in tqdm(
+                zip(dataloader_train_t2g, dataloader_train_g2t), desc=f"[train][ep{ep}]"
+            ):
+                metrics = model.training_step(
+                    batch_t2g, batch_g2t, global_step=global_step
+                )
 
                 # log metrics
                 if global_step % conf.log_every_n_steps == 0:

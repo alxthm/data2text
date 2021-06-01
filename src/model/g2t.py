@@ -306,16 +306,16 @@ class G2T(nn.Module):
             self.vae_pfc = nn.Linear(dim_h * 2, dim_z * 2)
             self.vae_lstm = nn.LSTM(dim_h, dim_h, batch_first=True, bidirectional=True)
 
-    def enc_forward(self, batch, ent_mask, ent_text_mask, ent_len, rel_mask):
+    def enc_forward(self, batch_g2t, ent_mask, ent_text_mask, rel_mask):
         ent_enc = self.ent_enc(
-            self.ent_emb(batch["g2t_ent_text"]), ent_text_mask, ent_len=batch["g2t_ent_len"]
+            self.ent_emb(batch_g2t["ent_text"]), ent_text_mask, ent_len=batch_g2t["ent_len"]
         )  # (bs, max_num_ent, d)
-        rel_emb = self.rel_emb(batch["g2t_rel"])  # (bs, max_num_rel, d)
+        rel_emb = self.rel_emb(batch_g2t["rel"])  # (bs, max_num_rel, d)
         if self.blind:
             g_ent, g_root = ent_enc, ent_enc.mean(1)
         else:
             g_ent, g_root = self.graph_enc(
-                ent_enc, ent_mask, ent_len, rel_emb, rel_mask, batch["g2t_graph"]
+                ent_enc, ent_mask, batch_g2t["ent_len"], rel_emb, rel_mask, batch_g2t["graph"]
             )  # (bs, max_num_ent, d) and (bs, d)
         return self.ln(g_ent), g_root, ent_enc
 
@@ -333,7 +333,7 @@ class G2T(nn.Module):
         _z = self.vae_pfc(_z.mean(1))
         return _z[:, : self.dim_z], _z[:, self.dim_z :]
 
-    def forward(self, batch, beam_size=-1):
+    def forward(self, batch_g2t, beam_size=-1):
         """
 
         Args:
@@ -359,12 +359,12 @@ class G2T(nn.Module):
 
         # (bs, max_num_ent) bool tensor, with max_num_ent/rel the max nb of ent/rel in the batch sentences
         # False if entity j exists in sentence i (i.e. if j < num_ent_i)
-        ent_mask = len2mask(batch["g2t_ent_len"], batch["g2t_ent_text"].device)
-        ent_text_mask = batch["g2t_ent_text"] == 0  # (sum(num_ent_i), max_ent_len)
+        ent_mask = len2mask(batch_g2t["ent_len"], batch_g2t["ent_text"].device)
+        ent_text_mask = batch_g2t["ent_text"] == 0  # (sum(num_ent_i), max_ent_len)
 
-        rel_mask = batch["g2t_rel"] == 0  # (bs, max_num_rel), 0 means the <PAD>
+        rel_mask = batch_g2t["rel"] == 0  # (bs, max_num_rel), 0 means the <PAD>
         g_ent, g_root, ent_enc = self.enc_forward(
-            batch, ent_mask, ent_text_mask, batch["g2t_ent_len"], rel_mask
+            batch_g2t, ent_mask, ent_text_mask, rel_mask
         )  # (bs, max_num_ent, d), except for g_root which is missing the 1st dim
 
         _h, _c = g_root, g_root.clone().detach()
@@ -378,10 +378,10 @@ class G2T(nn.Module):
             )
             outs = []
             _mask = (
-                batch["g2t_text"] >= len(self.text_vocab)
+                batch_g2t["text"] >= len(self.text_vocab)
             ).long()  # 0 if token is in vocab, 1 if entity or unknown
             _inp = (
-                _mask * 3 + (1.0 - _mask) * batch["g2t_text"]
+                _mask * 3 + (1.0 - _mask) * batch_g2t["text"]
             )  # 3 is <UNK>, otherwise use token index
             tar_inp = self.tar_emb(_inp.long())
             # Note: x[:,:,None] <-> unsqueeze(-1)
@@ -392,9 +392,9 @@ class G2T(nn.Module):
             ) * tar_inp  # (bs, max_sent_len, d)
             # embeddings for entity tokens (0. elsewhere)
             embeddings_ent = ent_enc[
-                torch.arange(len(batch["g2t_text"]))[:, None].to(device),
+                torch.arange(len(batch_g2t["text"]))[:, None].to(device),
                 (
-                    (batch["g2t_text"] - len(self.text_vocab)) * _mask
+                    (batch_g2t["text"] - len(self.text_vocab)) * _mask
                 ).long(),  # 0 for ENT_0 and other tokens, i for ENT_i
             ]  # (bs, max_sent_len, d)
             embeddings_ent = (

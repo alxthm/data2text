@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
 
-from src.data.webnlg import Vocab, write_txt
+from src.data.webnlg import Vocab, write_txt, get_t2g_batch, get_g2t_batch
 from src.model.g2t import G2T
 from src.model.t2g import T2G
 
@@ -46,6 +46,7 @@ class CycleCVAE(nn.Module):
         t2g_weight_decay: float,
         gradient_clip_val: float,
         run_name: str,
+        device,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -60,6 +61,7 @@ class CycleCVAE(nn.Module):
         self.beam_size = beam_size
         self.gradient_clip_val = gradient_clip_val
         self.run_name = run_name
+        self.device = device
 
         # category weights: give less importance to more frequent relations
         t2g_weight = [rel_vocab.wf.get(x, 0) for x in rel_vocab.i2s]
@@ -120,15 +122,18 @@ class CycleCVAE(nn.Module):
         self.rouge = Rouge()
         self.cider = Cider()
 
-    def training_step(self, batch, global_step: int):
+    def training_step(self, batch_t2g_raw, batch_g2t_raw, global_step: int):
         # --- SUPERVISED
         self.train()
 
         # --- train t2g one step
-        pred = self.t2g_model(batch)  # pred (bs, ne, ne, num_relations)
+        batch_t2g = get_t2g_batch(
+            batch_t2g_raw, self.ent_vocab, self.text_vocab, self.device
+        )
+        pred = self.t2g_model(batch_t2g)  # pred (bs, ne, ne, num_relations)
         loss_t2g = F.nll_loss(
             pred.contiguous().view(-1, pred.shape[-1]),
-            batch["t2g_tgt"].contiguous().view(-1),  # initially shape (bs, ne, ne)
+            batch_t2g["tgt"].contiguous().view(-1),  # initially shape (bs, ne, ne)
             ignore_index=0,
             weight=self.t2g_weight,
         )
@@ -138,13 +143,14 @@ class CycleCVAE(nn.Module):
         self.t2g_optimizer.step()
 
         # --- train g2t one step
-        pred, _, kl_div = self.g2t_model(batch)
+        batch_g2t = get_g2t_batch(batch_g2t_raw, self.ent_vocab, self.device)
+        pred, _, kl_div = self.g2t_model(batch_g2t)
         recon_loss = F.nll_loss(
             pred.reshape(-1, pred.shape[-1]),
-            batch["g2t_tgt"].reshape(-1),
+            batch_g2t["tgt"].reshape(-1),
             ignore_index=0,
         )
-        kl_anneal = min(1.0, (global_step + 100) / (global_step + 10000))
+        kl_anneal = (global_step + 100) / (global_step + 10000)
         loss_g2t = recon_loss + kl_anneal * 8.0 / 385 * kl_div
         self.g2t_optimizer.zero_grad()
         loss_g2t.backward()
@@ -171,26 +177,25 @@ class CycleCVAE(nn.Module):
         self.g2t_same = []
 
     def eval_step(self, batch):
-        batch_size = len(batch["original_ent_text"])
+        batch_raw, batch_t2g, batch_g2t = batch
+        batch_size = len(batch_raw["ent_text"])
 
         # t2g
-        t2g_logits = self.t2g_model(batch)  # (bs, ne, ne, num_relations)
+        t2g_logits = self.t2g_model(batch_t2g)  # (bs, ne, ne, num_relations)
         num_relations = t2g_logits.shape[-1]
         self.wf_t2g.write(
-            self.graph_preds_as_str(
-                t2g_logits, batch["t2g_tgt"], batch["original_ent_text"]
-            )
+            self.graph_preds_as_str(t2g_logits, batch_t2g["tgt"], batch_raw["ent_text"])
         )
         # save predictions to later compute f1 metrics
         self.t2g_hyp.append(t2g_logits.view(-1, num_relations).argmax(-1).cpu())
-        self.t2g_ref.append(batch["t2g_tgt"].view(-1).cpu())
+        self.t2g_ref.append(batch_t2g["tgt"].view(-1).cpu())
 
         # g2t
-        seq = self.g2t_model(batch, beam_size=self.beam_size)  # (bs, max_sent_len)
-        r = write_txt(batch, batch["g2t_tgt"], self.text_vocab)
-        h = write_txt(batch, seq, self.text_vocab)
+        seq = self.g2t_model(batch_g2t, beam_size=self.beam_size)  # (bs, max_sent_len)
+        r = write_txt(batch_g2t["raw_ent_text"], batch_g2t["tgt"], self.text_vocab)
+        h = write_txt(batch_g2t["raw_ent_text"], seq, self.text_vocab)
         self.g2t_same += [
-            str(batch["original_raw_relation"][i]) + str(batch["original_ent_text"][i])
+            str(batch_raw["raw_relation"][i]) + str(batch_raw["ent_text"][i])
             for i in range(batch_size)
         ]
 

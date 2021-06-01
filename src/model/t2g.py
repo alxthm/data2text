@@ -42,13 +42,13 @@ class T2G(nn.Module):
         nn.init.constant_(self.ln1.bias.data, 0)
         nn.init.constant_(self.lno.bias.data, 0)
 
-    def forward(self, batch):
+    def forward(self, batch_t2g):
         d = self.d_model
 
         # full sentences (with entities as plain text), pretokenized with BERT
-        sents = batch["t2g_sents"]  # tensor of shape (bs, n)
+        sents = batch_t2g["sents"]  # tensor of shape (bs, n)
         # tuples of start/end indices for entities in sents (order: ENT_0, ENT_1, etc)
-        ents = batch["t2g_ents"]  # list of lists, (bs, num_entities_i)
+        ents = batch_t2g["ents"]  # list of lists, (bs, num_entities_i)
         if self.blind:  # blind means using entity only
             s = torch.zeros_like(sents)
         else:

@@ -3,7 +3,7 @@ dim_h: 512
 epoch: 50
 seed: 654321
 batch_size: 32
-mode: "sup" #['sup', 'cold_unsup', 'warm_unsup']
+mode: "sup" # 'sup' or 'unsup'
 log_every_n_steps: 50
 log_gradients: False
 save_checkpoints: False
