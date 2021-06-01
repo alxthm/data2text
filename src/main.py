@@ -32,7 +32,7 @@ def main(timestamp: str):
 
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
     mlflow.set_experiment("al.thomas_data_2_text")
-    run_name = f"{timestamp}-{conf.mode}"
+    run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}"
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
     print(f"run_name: {run_name}\n")
 
@@ -48,7 +48,9 @@ def main(timestamp: str):
             vocab,
             collate_fn_train,
             collate_fn_eval,
-        ) = prepare_data(data_dir=project_dir / "data", device=device, mode=conf.mode)
+        ) = prepare_data(
+            data_dir=project_dir / "data", device=device, is_supervised=conf.supervised
+        )
         dataloader_train_t2g = DataLoader(
             dataset_train_t2g,
             batch_size=conf.batch_size,
@@ -99,6 +101,7 @@ def main(timestamp: str):
             gradient_clip_val=conf.grad_clip,
             run_name=run_name,
             device=device,
+            is_supervised=conf.supervised,
         )
         model.to(device)
         summary = ModelSummary(model, mode="top")

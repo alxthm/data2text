@@ -344,7 +344,7 @@ def get_g2t_batch(raw_batch: List, ent_vocab: Vocab, device):
     return batch_g2t
 
 
-def prepare_data(data_dir, device, mode: str):
+def prepare_data(data_dir, device, is_supervised: bool):
     """
     If processed data is not found in `data/processed`:
         - load the files in `data/raw`
@@ -354,7 +354,7 @@ def prepare_data(data_dir, device, mode: str):
     Args:
         data_dir:
         device:
-        mode: 'sup' or 'unsup'
+        is_supervised:
 
     Returns:
         train, val, test datasets from processed data.
@@ -404,14 +404,12 @@ def prepare_data(data_dir, device, mode: str):
         torch.save(val_data, dataset_val_path)
         torch.save(test_data, dataset_test_path)
 
-    if mode == "sup":
+    if is_supervised:
         dataset_train_t2g = WebNLGDataset(dataset_train_path, mode="both")
         dataset_train_g2t = WebNLGDataset(dataset_train_path, mode="both")
-    elif mode == "unsup":
+    else:
         dataset_train_t2g = WebNLGDataset(dataset_train_path, mode="graph_only")
         dataset_train_g2t = WebNLGDataset(dataset_train_path, mode="text_only")
-    else:
-        raise ValueError
     dataset_val = WebNLGDataset(dataset_val_path, mode="both")
     dataset_test = WebNLGDataset(dataset_test_path, mode="both")
 

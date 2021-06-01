@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
 
-from src.data.webnlg import Vocab, write_txt, get_t2g_batch, get_g2t_batch
+from src.data.webnlg import Vocab, write_txt, get_t2g_batch, get_g2t_batch, build_graph
 from src.model.g2t import G2T
 from src.model.t2g import T2G
 
@@ -47,6 +47,7 @@ class CycleCVAE(nn.Module):
         gradient_clip_val: float,
         run_name: str,
         device,
+        is_supervised: bool,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -62,6 +63,7 @@ class CycleCVAE(nn.Module):
         self.gradient_clip_val = gradient_clip_val
         self.run_name = run_name
         self.device = device
+        self.is_supervised = is_supervised
 
         # category weights: give less importance to more frequent relations
         t2g_weight = [rel_vocab.wf.get(x, 0) for x in rel_vocab.i2s]
@@ -122,11 +124,87 @@ class CycleCVAE(nn.Module):
         self.rouge = Rouge()
         self.cider = Cider()
 
+    def predict_syntactic_batch_t2g(self, raw_batch: List):
+        """
+        Enrich raw batch (list of data examples) with predicted text x_hat, based on graph data y
+
+        Args:
+            raw_batch:
+
+        Returns:
+
+        """
+        syn_batch = []
+        if len(raw_batch) > 0:
+            batch_g2t = get_g2t_batch(raw_batch, self.ent_vocab, self.device)
+            g2t_pred = self.g2t_model(batch_g2t, beam_size=1).cpu()
+            for i, sample in enumerate(g2t_pred):
+                _s = sample.tolist()
+                if 2 in _s:  # <EOS> in list
+                    _s = _s[: _s.index(2)]
+                syn_sample = {
+                    "uuid": raw_batch[i]["uuid"],
+                    "text": _s,
+                    "ent_text": raw_batch[i]["ent_text"],
+                    "relation": raw_batch[i]["relation"],
+                    "graph": raw_batch[i]["graph"],
+                    "raw_relation": raw_batch[i]["raw_relation"],
+                }
+                syn_batch.append(syn_sample)
+
+        return syn_batch
+
+    def predict_syntactic_batch_g2t(self, raw_batch: List):
+        """
+        Enrich raw batch (list of data examples) with predicted graph y_hat (predicted relations
+        and the corresponding graph), based on text data x and known entities
+
+        Args:
+            raw_batch:
+
+        Returns:
+
+        """
+        batch_t2g = get_t2g_batch(
+            raw_batch, self.ent_vocab, self.text_vocab, self.device
+        )
+        t2g_pred = self.t2g_model(batch_t2g).argmax(-1).cpu()
+        syn_batch = []
+        for i, sample in enumerate(t2g_pred):
+            rel = []
+            for e1 in range(len(raw_batch[i]["ent_text"])):
+                for e2 in range(len(raw_batch[i]["ent_text"])):
+                    try:
+                        if (
+                            sample[e1, e2] != 3 and sample[e1, e2] != 0
+                        ):  # 3 is no relation and 0 is <PAD>
+                            rel.append([e1, int(sample[e1, e2]), e2])
+                    except:
+                        print(
+                            f"{([[self.ent_vocab(x) for x in y] for y in raw_batch[i]['ent_text']])}"
+                        )
+                        print(f"sample size: {sample.size()}")
+            syn_sample = {
+                "text": raw_batch[i]["text"],
+                "ent_text": raw_batch[i]["ent_text"],
+                "relation": [self.rel_vocab("<ROOT>")]
+                + sum([[x[1], self.rel_vocab.get_inv(x[1])] for x in rel], []),
+                "graph": build_graph(len(raw_batch[i]["ent_text"]), rel),
+                "uuid": raw_batch[i]["uuid"],
+            }
+            syn_batch.append(syn_sample)
+        return syn_batch
+
     def training_step(self, batch_t2g_raw, batch_g2t_raw, global_step: int):
-        # --- SUPERVISED
-        self.train()
 
         # --- train t2g one step
+        if self.is_supervised:
+            self.train()
+        else:
+            self.t2g_model.train()
+            self.g2t_model.eval()
+            with torch.no_grad():
+                batch_t2g_raw = self.predict_syntactic_batch_t2g(batch_t2g_raw)
         batch_t2g = get_t2g_batch(
             batch_t2g_raw, self.ent_vocab, self.text_vocab, self.device
         )
@@ -143,6 +221,13 @@ class CycleCVAE(nn.Module):
         self.t2g_optimizer.step()
 
         # --- train g2t one step
+        if self.is_supervised:
+            self.train()
+        else:
+            self.t2g_model.eval()
+            self.g2t_model.train()
+            with torch.no_grad():
+                batch_g2t_raw = self.predict_syntactic_batch_g2t(batch_g2t_raw)
         batch_g2t = get_g2t_batch(batch_g2t_raw, self.ent_vocab, self.device)
         pred, _, kl_div = self.g2t_model(batch_g2t)
         recon_loss = F.nll_loss(
