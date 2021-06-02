@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.data.webnlg import prepare_data, tokenizer
+from src.data.webnlg import prepare_data
 from src.model.cycle_cvae import CycleCVAE
 from src.utils import (
     WarningsFilter,
@@ -79,7 +79,7 @@ def main(timestamp: str):
             text_vocab=vocab["text"],
             ent_vocab=vocab["entity"],
             rel_vocab=vocab["relation"],
-            tokenizer=tokenizer,  # todo: obtain correctly instead of importing
+            tokenizer=collate_fn_eval.tokenizer,
             tot_epoch=conf.epoch,
             dim_h=conf.dim_h,
             dim_z=conf.g2t.dim_z,

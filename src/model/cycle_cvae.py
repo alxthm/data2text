@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
 
-from src.data.webnlg import Vocab, write_txt, get_t2g_batch, get_g2t_batch, build_graph
+from src.data.shared import Vocab, write_txt, get_t2g_batch, get_g2t_batch, build_graph
 from src.model.g2t import G2T
 from src.model.t2g import T2G
 
@@ -166,7 +166,7 @@ class CycleCVAE(nn.Module):
 
         """
         batch_t2g = get_t2g_batch(
-            raw_batch, self.ent_vocab, self.text_vocab, self.device
+            raw_batch, self.ent_vocab, self.text_vocab, self.device, self.tokenizer
         )
         t2g_pred = self.t2g_model(batch_t2g).argmax(-1).cpu()
         syn_batch = []
@@ -206,7 +206,7 @@ class CycleCVAE(nn.Module):
             with torch.no_grad():
                 batch_t2g_raw = self.predict_syntactic_batch_t2g(batch_t2g_raw)
         batch_t2g = get_t2g_batch(
-            batch_t2g_raw, self.ent_vocab, self.text_vocab, self.device
+            batch_t2g_raw, self.ent_vocab, self.text_vocab, self.device, self.tokenizer
         )
         pred = self.t2g_model(batch_t2g)  # pred (bs, ne, ne, num_relations)
         loss_t2g = F.nll_loss(
