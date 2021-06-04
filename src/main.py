@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.data.webnlg import prepare_data
 from src.model.cycle_cvae import CycleCVAE
 from src.utils import (
     WarningsFilter,
@@ -40,6 +39,13 @@ def main(timestamp: str):
         mlflow_log_src_and_config(conf, project_dir)
 
         # load data
+        if conf.dataset == "genwiki":
+            from src.data.genwiki import prepare_data
+        elif conf.dataset == "webnlg":
+            from src.data.webnlg import prepare_data
+        else:
+            raise ValueError
+
         (
             dataset_train_t2g,
             dataset_train_g2t,

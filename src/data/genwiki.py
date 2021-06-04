@@ -23,11 +23,30 @@ def load_raw_dataset(path: Path):
             # change the data to match WebNLG format
             data_webnlg = []
             for d in data:
+                entities = [[e] for e in d["entities"]]
+                # replace empty entities (from original list) by a blank character
+                entities = [e if e != [""] else ["_"] for e in entities]
+
+                relations = []
+                for (e1, r, e2) in d["graph"]:
+                    # replace empty entities (in graph) by a blank character
+                    if e1 == "":
+                        e1 = "_"
+                    if e2 == "":
+                        e2 = "_"
+                    relations.append([[e1], r, [e2]])
+                    # by default, GenWiki only has entities from the text in 'entities'
+                    # -> add the ones present in the graph (and not the text) as well,
+                    # to match WebNLG
+                    if e1 not in entities:
+                        entities.append([e1])
+                    if e2 not in entities:
+                        entities.append([e2])
                 data_webnlg.append(
                     {
-                        "relations": [[[e1], r, [e2]] for (e1, r, e2) in d["graph"]],
+                        "relations": relations,
                         "text": d["text"],
-                        "entities": [[e] for e in d["entities"]],
+                        "entities": entities,
                     }
                 )
 
@@ -71,7 +90,7 @@ def prepare_data(data_dir, device, is_supervised: bool):
     vocab_path = data_dir / "processed/genwiki/vocab.data"
 
     # if necessary, build vocabulary and save processed datasets to disk
-    if not os.path.isfile(data_dir / "processed/genwiki/train.data"):
+    if not os.path.isfile(data_dir / "processed/genwiki/test.data"):
         os.makedirs(data_dir / "processed/genwiki", exist_ok=True)
         random.seed(0)
 
@@ -82,8 +101,7 @@ def prepare_data(data_dir, device, is_supervised: bool):
         random.shuffle(train_fine_raw)
         val_dataset_size = 10000
         val_raw = train_fine_raw[:val_dataset_size]
-        # train_raw = train_fine_raw[val_dataset_size:] todo: test only
-        train_raw = train_fine_raw[val_dataset_size : 2 * val_dataset_size]
+        train_raw = train_fine_raw[val_dataset_size:]
 
         # remove top 5% longer sequences in train
         # max_len = sorted([len(x["text"].split()) for x in train_raw])[
@@ -105,9 +123,10 @@ def prepare_data(data_dir, device, is_supervised: bool):
         torch.save(vocab, vocab_path)
 
         # build and save datasets
-        train_data = [Example(x, vocab).get() for x in train_raw]
-        val_data = [Example(x, vocab).get() for x in val_raw]
-        test_data = [Example(x, vocab).get() for x in test_raw]
+        print("Building datasets (train/val/test)...")
+        train_data = [Example(x, vocab).get() for x in tqdm(train_raw)]
+        val_data = [Example(x, vocab).get() for x in tqdm(val_raw)]
+        test_data = [Example(x, vocab).get() for x in tqdm(test_raw)]
         torch.save(train_data, dataset_train_path)
         torch.save(val_data, dataset_val_path)
         torch.save(test_data, dataset_test_path)
