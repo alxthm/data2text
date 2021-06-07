@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from transformers import BertTokenizer
 
-from src.data.shared import scan_data, Example, CycleCVAECollator, CycleCVAEDataset
+from src.data.cyclegt.shared import scan_data, Example, CycleCVAECollator, CycleCVAEDataset
 
 
 def prepare_data(data_dir, device, is_supervised: bool):

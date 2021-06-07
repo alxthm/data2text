@@ -9,7 +9,9 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from transformers import T5ForConditionalGeneration, Trainer, TrainingArguments
 
+from src.data.seq2seq.genwiki import GenWikiDataset
 from src.model.cycle_cvae import CycleCVAE
 from src.utils import (
     WarningsFilter,
@@ -19,10 +21,58 @@ from src.utils import (
 )
 
 
-def main(timestamp: str):
+def main_seq2seq(timestamp: str):
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
-    conf = OmegaConf.load(project_dir / "conf/config.yaml")
+    conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+    print(OmegaConf.to_yaml(conf))
+
+    # seed everything
+    seed_everything(conf.seed)
+
+    mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
+    mlflow.set_experiment("al.thomas_data_2_text")
+    run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}"
+    tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
+    print(f"run_name: {run_name}\n")
+
+    with mlflow.start_run(run_name=run_name):
+        mlflow_log_src_and_config(conf, project_dir)
+
+        # load data
+        dataset_train = GenWikiDataset(project_dir / "data")
+        dataset_val = GenWikiDataset(project_dir / "data")
+
+        # prepare model
+        model = T5ForConditionalGeneration.from_pretrained("t5-small")
+        summary = ModelSummary(model, mode="top")
+        print(summary)
+
+        # train model
+        training_args = TrainingArguments(
+            output_dir=tb_writer.log_dir,
+            learning_rate=conf.lr,
+            logging_dir=tb_writer.log_dir,
+            save_strategy="no",
+            #  To ensure reproducibility across runs, use the model_init() function
+            #  to instantiate the model if it has some randomly initialized parameters?
+            seed=conf.seed,
+        )
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=dataset_train,
+            eval_dataset=dataset_val,
+        )
+        trainer.train()
+
+        # todo: evaluate on test
+
+
+def main_cyclegt(timestamp: str):
+    # Load config
+    project_dir = Path(__file__).resolve().parents[1]
+    conf = OmegaConf.load(project_dir / "conf/conf_cyclegt.yaml")
     print(OmegaConf.to_yaml(conf))
 
     # seed everything
@@ -40,9 +90,9 @@ def main(timestamp: str):
 
         # load data
         if conf.dataset == "genwiki":
-            from src.data.genwiki import prepare_data
+            from src.data.cyclegt.genwiki import prepare_data
         elif conf.dataset == "webnlg":
-            from src.data.webnlg import prepare_data
+            from src.data.cyclegt.webnlg import prepare_data
         else:
             raise ValueError
 
@@ -164,4 +214,4 @@ if __name__ == "__main__":
     sys.stdout = WarningsFilter(sys.stdout)
     sys.stderr = WarningsFilter(sys.stderr)
     timestamp = datetime.datetime.today().strftime("%m%d%H%M%S")
-    main(timestamp=timestamp)
+    main_cyclegt(timestamp=timestamp)

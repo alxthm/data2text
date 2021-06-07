@@ -9,7 +9,12 @@ import torch
 from tqdm import tqdm
 from transformers import BertTokenizer
 
-from src.data.shared import CycleCVAEDataset, CycleCVAECollator, Example, scan_data
+from src.data.cyclegt.shared import (
+    CycleCVAEDataset,
+    CycleCVAECollator,
+    Example,
+    scan_data,
+)
 
 
 def load_raw_dataset(path: Path):

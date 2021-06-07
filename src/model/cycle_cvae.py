@@ -14,7 +14,13 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
 
-from src.data.shared import Vocab, write_txt, get_t2g_batch, get_g2t_batch, build_graph
+from src.data.cyclegt.shared import (
+    Vocab,
+    write_txt,
+    get_t2g_batch,
+    get_g2t_batch,
+    build_graph,
+)
 from src.model.g2t import G2T
 from src.model.t2g import T2G
 
