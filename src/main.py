@@ -9,10 +9,15 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from transformers import T5ForConditionalGeneration, Trainer, TrainingArguments
+from transformers import (
+    T5ForConditionalGeneration,
+    Trainer,
+    TrainingArguments,
+    AutoTokenizer,
+)
 
-from src.data.seq2seq.genwiki import GenWikiDataset
-from src.model.cycle_cvae import CycleCVAE
+from src.data.datasets import WebNLG
+from src._old_model.cycle_cvae import CycleCVAE
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -40,8 +45,13 @@ def main_seq2seq(timestamp: str):
         mlflow_log_src_and_config(conf, project_dir)
 
         # load data
-        dataset_train = GenWikiDataset(project_dir / "data")
-        dataset_val = GenWikiDataset(project_dir / "data")
+        tokenizer = AutoTokenizer.from_pretrained("t5-small")
+        dataset_train = WebNLG(
+            data_dir=project_dir / "data", split="train", tokenizer=tokenizer
+        )
+        dataset_val = WebNLG(
+            data_dir=project_dir / "data", split="val", tokenizer=tokenizer
+        )
 
         # prepare model
         model = T5ForConditionalGeneration.from_pretrained("t5-small")
@@ -62,14 +72,14 @@ def main_seq2seq(timestamp: str):
             model=model,
             args=training_args,
             train_dataset=dataset_train,
-            eval_dataset=dataset_val,
+            # eval_dataset=dataset_val,
         )
         trainer.train()
 
-        # todo: evaluate on test
+        # todo: evaluate on test and val
 
 
-def main_cyclegt(timestamp: str):
+def main_old_cyclegt(timestamp: str):
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf_cyclegt.yaml")
@@ -90,9 +100,9 @@ def main_cyclegt(timestamp: str):
 
         # load data
         if conf.dataset == "genwiki":
-            from src.data.cyclegt.genwiki import prepare_data
+            from src.data._old_cyclegt.genwiki import prepare_data
         elif conf.dataset == "webnlg":
-            from src.data.cyclegt.webnlg import prepare_data
+            from src.data._old_cyclegt.webnlg import prepare_data
         else:
             raise ValueError
 
@@ -214,4 +224,4 @@ if __name__ == "__main__":
     sys.stdout = WarningsFilter(sys.stdout)
     sys.stderr = WarningsFilter(sys.stderr)
     timestamp = datetime.datetime.today().strftime("%m%d%H%M%S")
-    main_cyclegt(timestamp=timestamp)
+    main_old_cyclegt(timestamp=timestamp)

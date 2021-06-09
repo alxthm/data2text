@@ -63,6 +63,11 @@ def mlflow_log_src_and_config(conf, project_dir: Path):
         mlflow.log_artifact(str(f), f"code/{f.relative_to(project_dir)}")
 
 
+def camel_case_to_natural_text(s: str):
+    # https://stackoverflow.com/a/44969381
+    return "".join([" " + c.lower() if c.isupper() else c for c in s]).lstrip(" ")
+
+
 # from https://github.com/PyTorchLightning/pytorch-lightning/
 
 
@@ -108,12 +113,12 @@ class LayerSummary(object):
 
     @property
     def layer_type(self) -> str:
-        """ Returns the class name of the module. """
+        """Returns the class name of the module."""
         return str(self._module.__class__.__name__)
 
     @property
     def num_parameters(self) -> int:
-        """ Returns the number of parameters in this module. """
+        """Returns the number of parameters in this module."""
         return sum(np.prod(p.shape) for p in self._module.parameters())
 
 
