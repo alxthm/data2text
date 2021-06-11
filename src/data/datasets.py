@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Tuple, Generator
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, default_data_collator
 
@@ -36,6 +36,7 @@ class WebNLG(Dataset):
         data_dir: Path,
         split: str,
         tokenizer: PreTrainedTokenizer,
+        limit_samples=-1,
     ):
         """
 
@@ -46,6 +47,7 @@ class WebNLG(Dataset):
         """
         self.tokenizer = tokenizer
         self.split = split
+        self.limit_samples = limit_samples
 
         self.input_format = InputFormat()
         self.output_format = OutputFormat()
@@ -227,14 +229,21 @@ class WebNLG(Dataset):
         """
         results = Counter()
 
-        for example, output_sentence in self.generate_output_sentences(
-            model, device, batch_size, num_beams
+        logs = ""
+        for i, (example, output_sentence, input_sentence, label_sentence) in enumerate(
+            self.generate_output_sentences(model, device, batch_size, num_beams)
         ):
             new_result = self.evaluate_example(
                 example=example,
                 output_sentence=output_sentence,
             )
             results += new_result
+            logs += (
+                f"[{i}] input / output / label\n"
+                f"{input_sentence}\n"
+                f"{output_sentence}\n"
+                f"{label_sentence}\n"
+            )
 
         entity_precision, entity_recall, entity_f1 = get_precision_recall_f1(
             num_correct=results["correct_entities"],
@@ -248,20 +257,23 @@ class WebNLG(Dataset):
         )
 
         res = {
-            "wrong_reconstruction": results["wrong_reconstructions"]
+            f"{self.split}_wrong_reconstruction": results["wrong_reconstructions"]
             / results["num_sentences"],
-            "label_error": results["label_error"] / results["num_sentences"],
-            "entity_error": results["entity_error"] / results["num_sentences"],
-            "format_error": results["format_error"] / results["num_sentences"],
-            "entity_precision": entity_precision,
-            "entity_recall": entity_recall,
-            "entity_f1": entity_f1,
-            "relation_precision": relation_precision,
-            "relation_recall": relation_recall,
-            "relation_f1": relation_f1,
+            f"{self.split}_label_error": results["label_error"]
+            / results["num_sentences"],
+            f"{self.split}_entity_error": results["entity_error"]
+            / results["num_sentences"],
+            f"{self.split}_format_error": results["format_error"]
+            / results["num_sentences"],
+            f"{self.split}_entity_precision": entity_precision,
+            f"{self.split}_entity_recall": entity_recall,
+            f"{self.split}_entity_f1": entity_f1,
+            f"{self.split}_relation_precision": relation_precision,
+            f"{self.split}_relation_recall": relation_recall,
+            f"{self.split}_relation_f1": relation_f1,
         }
 
-        return res
+        return res, logs
 
     def generate_output_sentences(
         self,
@@ -274,15 +286,17 @@ class WebNLG(Dataset):
         Generate pairs (example, output_sentence) for evaluation on this dataset.
         """
 
+        # to speed up validation, only consider a few samples
+        dataset = Subset(self, range(self.limit_samples)) if self.limit_samples > 0 else self
         eval_data_loader = DataLoader(
-            self,
+            dataset,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=default_data_collator,
         )
 
-        logging.info(f"Generating sentences on dataset {self.split}")
-        for i, inputs in tqdm(enumerate(eval_data_loader)):
+        logging.info(f"Generating sentences on dataset {self.split}...")
+        for i, inputs in tqdm(enumerate(eval_data_loader), total=len(eval_data_loader)):
             predictions = model.generate(
                 inputs["input_ids"].to(device),
                 max_length=self.max_output_length,
@@ -299,8 +313,16 @@ class WebNLG(Dataset):
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
                 )
+                input_sentence = self.tokenizer.decode(
+                    input_ids,
+                    skip_special_tokens=True,
+                )
+                label_sentence = self.tokenizer.decode(
+                    label_ids,
+                    skip_special_tokens=True,
+                )
 
-                yield example, output_sentence
+                yield example, output_sentence, input_sentence, label_sentence
 
     def _warn_max_sequence_length(
         self, max_sequence_length: int, sentences: List[str], name: str
