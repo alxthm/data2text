@@ -15,6 +15,7 @@ from transformers import (
     TrainingArguments,
     AutoTokenizer,
 )
+from transformers.integrations import MLflowCallback
 
 from src.data.datasets import WebNLG
 from src._old_model.cycle_cvae import CycleCVAE
@@ -37,7 +38,7 @@ def main_seq2seq(timestamp: str):
 
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
     mlflow.set_experiment("al.thomas_data_2_text")
-    run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}"
+    run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}-{conf.model}"
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
     print(f"run_name: {run_name}\n")
 
@@ -45,16 +46,16 @@ def main_seq2seq(timestamp: str):
         mlflow_log_src_and_config(conf, project_dir)
 
         # load data
-        tokenizer = AutoTokenizer.from_pretrained("t5-small")
+        tokenizer = AutoTokenizer.from_pretrained(conf.model)
         dataset_train = WebNLG(
             data_dir=project_dir / "data", split="train", tokenizer=tokenizer
         )
-        dataset_val = WebNLG(
-            data_dir=project_dir / "data", split="val", tokenizer=tokenizer
-        )
+        # dataset_val = WebNLG(
+        #     data_dir=project_dir / "data", split="val", tokenizer=tokenizer
+        # )
 
         # prepare model
-        model = T5ForConditionalGeneration.from_pretrained("t5-small")
+        model = T5ForConditionalGeneration.from_pretrained(conf.model)
         summary = ModelSummary(model, mode="top")
         print(summary)
 
@@ -67,6 +68,7 @@ def main_seq2seq(timestamp: str):
             #  To ensure reproducibility across runs, use the model_init() function
             #  to instantiate the model if it has some randomly initialized parameters?
             seed=conf.seed,
+            num_train_epochs=conf.epochs,
         )
         trainer = Trainer(
             model=model,
@@ -74,6 +76,7 @@ def main_seq2seq(timestamp: str):
             train_dataset=dataset_train,
             # eval_dataset=dataset_val,
         )
+        trainer.remove_callback(MLflowCallback)
         trainer.train()
 
         # todo: evaluate on test and val
@@ -224,4 +227,4 @@ if __name__ == "__main__":
     sys.stdout = WarningsFilter(sys.stdout)
     sys.stderr = WarningsFilter(sys.stderr)
     timestamp = datetime.datetime.today().strftime("%m%d%H%M%S")
-    main_old_cyclegt(timestamp=timestamp)
+    main_seq2seq(timestamp=timestamp)

@@ -1,2 +1,5 @@
 seed: 0
 supervised: False
+lr: 1.0e-4
+epochs: 10
+model: "t5-small"

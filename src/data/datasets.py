@@ -50,6 +50,9 @@ class WebNLG(Dataset):
 
         if not os.path.isfile(data_dir / "processed/webnlg_seq2seq/train.pth"):
             # if not already done, preprocess raw data and save it to disk
+            logging.info(
+                "Processed data not found.\nLoading and processing raw data..."
+            )
             os.makedirs(data_dir / "processed/webnlg_seq2seq", exist_ok=True)
 
             # todo: use the real WebNLG dataset as raw data
@@ -64,7 +67,7 @@ class WebNLG(Dataset):
                 features = self.compute_features(examples)
 
                 torch.save(
-                    {"examples": examples, "features": features},
+                    (examples, features),
                     data_dir / f"processed/webnlg_seq2seq/{split}.pth",
                 )
 
@@ -152,11 +155,11 @@ class WebNLG(Dataset):
             input_tok.input_ids, input_tok.attention_mask, output_tok.input_ids
         ):
             features.append(
-                (
-                    input_ids.tolist(),
-                    att_mask.tolist(),
-                    label_ids.tolist(),
-                )
+                {
+                    "input_ids": input_ids.tolist(),
+                    "attention_mask": att_mask.tolist(),
+                    "label_ids": label_ids.tolist(),
+                }
             )
 
         return features
