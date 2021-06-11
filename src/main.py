@@ -1,4 +1,5 @@
 import datetime
+import logging
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from transformers.integrations import MLflowCallback
 
 from src.data.datasets import WebNLG
 from src._old_model.cycle_cvae import CycleCVAE
+from src.data.formatting import OutputFormat
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -26,12 +28,14 @@ from src.utils import (
     ModelSummary,
 )
 
+logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO)
+
 
 def main_seq2seq(timestamp: str):
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
-    print(OmegaConf.to_yaml(conf))
+    logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
     seed_everything(conf.seed)
@@ -40,24 +44,51 @@ def main_seq2seq(timestamp: str):
     mlflow.set_experiment("al.thomas_data_2_text")
     run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}-{conf.model}"
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
-    print(f"run_name: {run_name}\n")
+    logging.info(f"run_name: {run_name}\n")
+    logging.info("picheee")
 
     with mlflow.start_run(run_name=run_name):
         mlflow_log_src_and_config(conf, project_dir)
 
-        # load data
+        # load tokenizer
+        special_tokens_dict = {
+            "additional_special_tokens": [
+                OutputFormat.HEAD_TOKEN,
+                OutputFormat.TYPE_TOKEN,
+                OutputFormat.TAIL_TOKEN,
+            ]
+        }
         tokenizer = AutoTokenizer.from_pretrained(conf.model)
+        tokenizer.add_special_tokens(special_tokens_dict)
+
+        # load data
         dataset_train = WebNLG(
             data_dir=project_dir / "data", split="train", tokenizer=tokenizer
         )
-        # dataset_val = WebNLG(
-        #     data_dir=project_dir / "data", split="val", tokenizer=tokenizer
-        # )
+        dataset_val = WebNLG(
+            data_dir=project_dir / "data", split="val", tokenizer=tokenizer
+        )
 
         # prepare model
         model = T5ForConditionalGeneration.from_pretrained(conf.model)
+        # extend embedding matrices to include new special tokens
+        model.resize_token_embeddings(len(tokenizer))
         summary = ModelSummary(model, mode="top")
-        print(summary)
+        logging.info(summary)
+
+        def evaluate():
+            model.eval()  # .no_grad() already called by model.generate(), but not .eval()
+            device = torch.device(0 if torch.cuda.is_available() else "cpu")
+            model.to(device)
+            res = dataset_val.evaluate_dataset(
+                model,
+                device=device,
+                batch_size=conf.batch_size_val,
+                num_beams=conf.num_beams,
+            )
+            logging.info(res)
+
+        evaluate()
 
         # train model
         training_args = TrainingArguments(
@@ -70,6 +101,7 @@ def main_seq2seq(timestamp: str):
             seed=conf.seed,
             num_train_epochs=conf.epochs,
         )
+        logging.info("training...")
         trainer = Trainer(
             model=model,
             args=training_args,
@@ -79,14 +111,14 @@ def main_seq2seq(timestamp: str):
         trainer.remove_callback(MLflowCallback)
         trainer.train()
 
-        # todo: evaluate on test and val
+        evaluate()
 
 
 def main_old_cyclegt(timestamp: str):
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf_cyclegt.yaml")
-    print(OmegaConf.to_yaml(conf))
+    logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
     device = torch.device(0) if torch.cuda.is_available() else torch.device("cpu")
@@ -96,7 +128,7 @@ def main_old_cyclegt(timestamp: str):
     mlflow.set_experiment("al.thomas_data_2_text")
     run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}"
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
-    print(f"run_name: {run_name}\n")
+    logging.info(f"run_name: {run_name}\n")
 
     with mlflow.start_run(run_name=run_name):
         mlflow_log_src_and_config(conf, project_dir)
@@ -174,7 +206,7 @@ def main_old_cyclegt(timestamp: str):
         )
         model.to(device)
         summary = ModelSummary(model, mode="top")
-        print(summary)
+        logging.info(summary)
 
         # train
         global_step = 0

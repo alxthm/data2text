@@ -21,6 +21,40 @@ def test_output_format():
     )
 
 
+def test_run_inference():
+    output_sentence = (
+        "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
+        "[HEAD] Abilene [TYPE] served [TAIL] Regional Airport"
+    )
+    output_format = OutputFormat()
+    pred_ent, pred_rel, error = output_format.run_inference(output_sentence)
+    assert not error
+    assert pred_ent == {
+        "Abilene , Texas",
+        "Abilene",
+        "Abilene Regional Airport",
+        "Regional Airport",
+    }
+    assert pred_rel == {
+        ("Abilene , Texas", "city served", "Abilene Regional Airport"),
+        ("Abilene", "served", "Regional Airport"),
+    }
+
+
+def test_run_inference2():
+    output_sentence = (
+        "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
+        "[HEAD] Abilene served [TAIL] Regional Airport"
+    )
+    output_format = OutputFormat()
+    pred_ent, pred_rel, error = output_format.run_inference(output_sentence)
+    assert error
+    assert pred_ent == {"Abilene , Texas", "Abilene Regional Airport"}
+    assert pred_rel == {
+        ("Abilene , Texas", "city served", "Abilene Regional Airport"),
+    }
+
+
 def test_webnlg_dataset():
     examples_to_match = [
         Example(
@@ -66,13 +100,13 @@ def test_webnlg_dataset():
 
     project_dir = Path(__file__).resolve().parents[1]
     tokenizer = AutoTokenizer.from_pretrained("t5-small")
-    webnlg = WebNLG(
-            data_dir=project_dir / "data", split="train", tokenizer=tokenizer
-        )
+    webnlg = WebNLG(data_dir=project_dir / "data", split="train", tokenizer=tokenizer)
     examples = webnlg.construct_examples(fake_raw_data)
     assert examples == examples_to_match
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_output_format()
+    test_run_inference()
+    test_run_inference2()
     test_webnlg_dataset()

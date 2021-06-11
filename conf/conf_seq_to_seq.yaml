@@ -1,5 +1,9 @@
 seed: 0
 supervised: False
-lr: 1.0e-4
-epochs: 10
+# training
 model: "t5-small"
+epochs: 10
+lr: 1.0e-4
+# validation
+num_beams: 8
+batch_size_val: 32

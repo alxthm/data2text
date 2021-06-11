@@ -68,6 +68,17 @@ def camel_case_to_natural_text(s: str):
     return "".join([" " + c.lower() if c.isupper() else c for c in s]).lstrip(" ")
 
 
+def get_precision_recall_f1(num_correct, num_predicted, num_gt):
+    assert 0 <= num_correct <= num_predicted
+    assert 0 <= num_correct <= num_gt
+
+    precision = num_correct / num_predicted if num_predicted > 0 else 0.0
+    recall = num_correct / num_gt if num_gt > 0 else 0.0
+    f1 = 2.0 / (1.0 / precision + 1.0 / recall) if num_correct > 0 else 0.0
+
+    return precision, recall, f1
+
+
 # from https://github.com/PyTorchLightning/pytorch-lightning/
 
 
