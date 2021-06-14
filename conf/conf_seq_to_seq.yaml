@@ -2,8 +2,8 @@ seed: 0
 supervised: False
 
 # training
-model: "t5-small"
-epochs: 10
+model: "t5-base"
+epochs: 5
 lr: 1.0e-4
 batch_size_train: 8
 

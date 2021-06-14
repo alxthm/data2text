@@ -2,7 +2,7 @@ import datetime
 import logging
 import sys
 
-from src.train import main
+from src.train import train
 from src.utils import (
     WarningsFilter,
 )
@@ -17,4 +17,4 @@ if __name__ == "__main__":
     sys.stdout = WarningsFilter(sys.stdout)
     sys.stderr = WarningsFilter(sys.stderr)
     timestamp = datetime.datetime.today().strftime("%m%d%H%M%S")
-    main(timestamp=timestamp)
+    train(timestamp=timestamp)

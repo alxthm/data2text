@@ -8,6 +8,7 @@ import random
 
 import torch
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 
 
 class WarningsFilter:
@@ -40,11 +41,28 @@ class WarningsFilter:
         self.stream.flush()
 
 
+class MyLogger:
+    """
+    Simple utility class to log metrics to mlflow and tensorboard
+    (if there is any tensorboard writer)
+    """
+
+    def __init__(self, tensorboard_writer: SummaryWriter = None):
+        self.tb_writer = tensorboard_writer
+
+    def log_metrics(self, metrics: Dict[str, float], step: int):
+        mlflow.log_metrics(metrics, step=step)
+        if self.tb_writer:
+            for k, v in metrics.items():
+                self.tb_writer.add_scalar(k, v, global_step=step)
+
+
 def update_artifacts_path():
     # change artifacts locations from hdfs to viewfs, as recommended
     # on mlflow slack channel
     import mlflow
     import os
+
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
     experiment_name = "al.thomas_data_2_text"
     experiment = mlflow.get_experiment_by_name(experiment_name)

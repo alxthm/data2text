@@ -17,11 +17,15 @@ from transformers import (
 )
 
 from src.data.datasets import WebNLG
+from src.utils import MyLogger
 
 
 class EvalCallback(TrainerCallback):
     """
     Run evaluation on val dataset on epoch end, and eval on test when training is done
+
+    (not necessary when using custom training loop, instead of the default
+    huggingface Trainer class)
     """
 
     def __init__(self, evaluator: "Evaluator"):
@@ -63,14 +67,14 @@ class Evaluator:
         self.test_dataset = test_dataset
         self.tokenizer = tokenizer
         self.model = model
-        self.device = torch.device(0 if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.batch_size = batch_size
         self.num_beams = num_beams
         self.max_output_length = val_dataset.max_output_length
 
+        self.logger = MyLogger(tensorboard_writer)
         self.log_path = log_path
-        self.tb_writer = tensorboard_writer
         self.limit_samples = limit_samples  # do not use all entire validation dataset
 
     def evaluate_and_log(self, epoch, split: str):
@@ -91,10 +95,7 @@ class Evaluator:
 
         # print and save eval metrics
         logging.info(f"[ep{epoch}] eval results: {res}")
-        mlflow.log_metrics(res, step=epoch)
-        if self.tb_writer:
-            for k, v in res.items():
-                self.tb_writer.add_scalar(k, v, global_step=epoch)
+        self.logger.log_metrics(metrics=res, step=epoch)
 
         # save predictions logs to mlflow
         with open(self.log_path / f"t2g_{epoch}.txt", "w", encoding="utf-8") as f:
@@ -130,14 +131,14 @@ class Evaluator:
         relation_acc = accuracy_score(relations_true, relations_pred)
 
         res = {
-            f"{split}_entity_acc": entity_acc,
-            f"{split}_entity_f1_micro": entity_f1_micro,
-            f"{split}_entity_f1_macro": entity_f1_macro,
-            f"{split}_relation_acc": relation_acc,
-            f"{split}_relation_f1_micro": relation_f1_micro,
-            f"{split}_relation_f1_macro": relation_f1_macro,
+            f"{split}/entity_acc": entity_acc,
+            f"{split}/entity_f1_micro": entity_f1_micro,
+            f"{split}/entity_f1_macro": entity_f1_macro,
+            f"{split}/relation_acc": relation_acc,
+            f"{split}/relation_f1_micro": relation_f1_micro,
+            f"{split}/relation_f1_macro": relation_f1_macro,
             # % errors when parsing model output
-            f"{split}_format_error": format_errors / len(entities_true),
+            f"{split}/format_error": format_errors / len(entities_true),
         }
 
         return res, logs
@@ -149,7 +150,7 @@ class Evaluator:
         dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=False,
+            shuffle=True,
             collate_fn=default_data_collator,
         )
 
