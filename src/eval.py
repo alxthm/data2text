@@ -98,9 +98,9 @@ class Evaluator:
         self.logger.log_metrics(metrics=res, step=epoch)
 
         # save predictions logs to mlflow
-        with open(self.log_path / f"t2g_{epoch}.txt", "w", encoding="utf-8") as f:
+        with open(self.log_path / f"t2g_{split}_{epoch}.txt", "w", encoding="utf-8") as f:
             f.write(logs)
-        mlflow.log_artifact(str(self.log_path / f"t2g_{epoch}.txt"), f"t2g_out/{epoch}")
+        mlflow.log_artifact(str(self.log_path / f"t2g_{split}_{epoch}.txt"), f"t2g_out/{epoch}")
 
     def run_evaluation(self, split: str):
         """
