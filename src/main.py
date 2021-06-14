@@ -2,7 +2,7 @@ import datetime
 import logging
 import sys
 
-from src.train.seq2seq import main
+from src.train import main
 from src.utils import (
     WarningsFilter,
 )

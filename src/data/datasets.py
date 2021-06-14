@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Tuple, Generator
 
 import torch
+from sklearn.metrics import f1_score, accuracy_score
 from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, default_data_collator
@@ -19,7 +20,7 @@ from src.data.formatting import (
     InputFormat,
     OutputFormat,
 )
-from src.utils import camel_case_to_natural_text, get_precision_recall_f1
+from src.utils import camel_case_to_natural_text
 
 
 class WebNLG(Dataset):
@@ -36,7 +37,6 @@ class WebNLG(Dataset):
         data_dir: Path,
         split: str,
         tokenizer: PreTrainedTokenizer,
-        limit_samples=-1,
     ):
         """
 
@@ -47,7 +47,6 @@ class WebNLG(Dataset):
         """
         self.tokenizer = tokenizer
         self.split = split
-        self.limit_samples = limit_samples
 
         self.input_format = InputFormat()
         self.output_format = OutputFormat()
@@ -176,153 +175,6 @@ class WebNLG(Dataset):
 
     def get_example(self, index):
         return self.examples[index]
-
-    def evaluate_example(self, example: Example, output_sentence: str):
-        (
-            predicted_entities,
-            predicted_relations,
-            wrong_format,
-        ) = self.output_format.run_inference(output_sentence)
-
-        # load ground truth entities and relations (as str and tuple of str)
-        gt_entities = set()
-        gt_relations = set()
-        for relation in example.graph:
-            gt_entities |= {relation.head.text, relation.tail.text}
-            gt_relations |= {relation.type.natural}
-
-        # compute correct entities
-        correct_entities = predicted_entities & gt_entities
-        # compute correct relations
-        correct_relations = predicted_relations & gt_relations
-
-        assert len(correct_entities) <= len(predicted_entities)
-        assert len(correct_entities) <= len(gt_entities)
-        assert len(correct_relations) <= len(predicted_relations)
-        assert len(correct_relations) <= len(gt_relations)
-
-        res = Counter(
-            {
-                "num_sentences": 1,
-                "wrong_reconstructions": 1 if wrong_format else 0,
-                "gt_entities": len(gt_entities),
-                "predicted_entities": len(predicted_entities),
-                "correct_entities": len(correct_entities),
-                "gt_relations": len(gt_relations),
-                "predicted_relations": len(predicted_relations),
-                "correct_relations": len(correct_relations),
-            }
-        )
-        # todo: add information about each entity/relation type to compute macro f1 scores?
-
-        return res
-
-    def evaluate_dataset(
-        self,
-        model,
-        device,
-        batch_size: int,
-        num_beams: int,
-    ):
-        """
-        Evaluate model on this dataset.
-        """
-        results = Counter()
-
-        logs = ""
-        for i, (example, output_sentence, input_sentence, label_sentence) in enumerate(
-            self.generate_output_sentences(model, device, batch_size, num_beams)
-        ):
-            new_result = self.evaluate_example(
-                example=example,
-                output_sentence=output_sentence,
-            )
-            results += new_result
-            logs += (
-                f"[{i}] input / output / label\n"
-                f"{input_sentence}\n"
-                f"{output_sentence}\n"
-                f"{label_sentence}\n"
-            )
-
-        entity_precision, entity_recall, entity_f1 = get_precision_recall_f1(
-            num_correct=results["correct_entities"],
-            num_predicted=results["predicted_entities"],
-            num_gt=results["gt_entities"],
-        )
-        relation_precision, relation_recall, relation_f1 = get_precision_recall_f1(
-            num_correct=results["correct_relations"],
-            num_predicted=results["predicted_relations"],
-            num_gt=results["gt_relations"],
-        )
-
-        res = {
-            f"{self.split}_wrong_reconstruction": results["wrong_reconstructions"]
-            / results["num_sentences"],
-            f"{self.split}_label_error": results["label_error"]
-            / results["num_sentences"],
-            f"{self.split}_entity_error": results["entity_error"]
-            / results["num_sentences"],
-            f"{self.split}_format_error": results["format_error"]
-            / results["num_sentences"],
-            f"{self.split}_entity_precision": entity_precision,
-            f"{self.split}_entity_recall": entity_recall,
-            f"{self.split}_entity_f1": entity_f1,
-            f"{self.split}_relation_precision": relation_precision,
-            f"{self.split}_relation_recall": relation_recall,
-            f"{self.split}_relation_f1": relation_f1,
-        }
-
-        return res, logs
-
-    def generate_output_sentences(
-        self,
-        model,
-        device,
-        batch_size: int,
-        num_beams: int,
-    ) -> Generator[Tuple[Example, str], None, None]:
-        """
-        Generate pairs (example, output_sentence) for evaluation on this dataset.
-        """
-
-        # to speed up validation, only consider a few samples
-        dataset = Subset(self, range(self.limit_samples)) if self.limit_samples > 0 else self
-        eval_data_loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=default_data_collator,
-        )
-
-        logging.info(f"Generating sentences on dataset {self.split}...")
-        for i, inputs in tqdm(enumerate(eval_data_loader), total=len(eval_data_loader)):
-            predictions = model.generate(
-                inputs["input_ids"].to(device),
-                max_length=self.max_output_length,
-                num_beams=num_beams,
-            )
-
-            for j, (input_ids, label_ids, prediction) in enumerate(
-                zip(inputs["input_ids"], inputs["labels"], predictions)
-            ):
-                current_id = i * batch_size + j
-                example = self.get_example(current_id)
-                output_sentence = self.tokenizer.decode(
-                    prediction,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                )
-                input_sentence = self.tokenizer.decode(
-                    input_ids,
-                    skip_special_tokens=True,
-                )
-                label_sentence = self.tokenizer.decode(
-                    label_ids,
-                    skip_special_tokens=True,
-                )
-
-                yield example, output_sentence, input_sentence, label_sentence
 
     def _warn_max_sequence_length(
         self, max_sequence_length: int, sentences: List[str], name: str

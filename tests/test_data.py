@@ -19,6 +19,24 @@ def test_output_format():
         output_format.format_output(graph)
         == "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
     )
+    graph = [
+        Relation(
+            Entity("Abilene , Texas"),
+            RelationType(short="cityServed", natural="city served"),
+            Entity("Abilene Regional Airport"),
+        ),
+        Relation(
+            Entity("Mbappe"),
+            RelationType(short="bestPlayer", natural="best player"),
+            Entity("France"),
+        ),
+    ]
+    output_format = OutputFormat()
+    assert (
+        output_format.format_output(graph)
+        == "[HEAD] Abilene , Texas [TYPE] city served "
+        "[TAIL] Abilene Regional Airport [HEAD] Mbappe [TYPE] best player [TAIL] France"
+    )
 
 
 def test_run_inference():
@@ -56,6 +74,7 @@ def test_run_inference2():
 
 
 def test_webnlg_dataset():
+    # check that we obtain the desired format when creating WebNLG dataset object
     examples_to_match = [
         Example(
             text="Abilene , Texas is served by the Abilene Regional Airport .",
