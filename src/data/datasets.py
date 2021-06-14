@@ -2,15 +2,13 @@ import json
 import logging
 import os
 import re
-from collections import Counter
 from pathlib import Path
-from typing import List, Tuple, Generator
+from typing import List
 
 import torch
-from sklearn.metrics import f1_score, accuracy_score
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset
 from tqdm import tqdm
-from transformers import PreTrainedTokenizer, default_data_collator
+from transformers import PreTrainedTokenizer
 
 from src.data.formatting import (
     Relation,

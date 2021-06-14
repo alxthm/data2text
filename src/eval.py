@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Union
 
 import mlflow
-import torch
 from sklearn.metrics import f1_score, accuracy_score
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -67,7 +66,7 @@ class Evaluator:
         self.test_dataset = test_dataset
         self.tokenizer = tokenizer
         self.model = model
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = model.device
 
         self.batch_size = batch_size
         self.num_beams = num_beams
