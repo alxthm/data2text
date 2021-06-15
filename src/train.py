@@ -61,7 +61,6 @@ class Seq2seqTrainer:
 
     def train(self):
         global_step = 0
-        training_metrics = Counter()
         logging.info("Training...")
         logging.info(f"     num_epochs: {self.num_epochs}")
 
