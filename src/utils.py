@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from pathlib import Path
 from typing import Union, List, Tuple, Dict
 
@@ -47,14 +47,32 @@ class MyLogger:
     (if there is any tensorboard writer)
     """
 
-    def __init__(self, tensorboard_writer: SummaryWriter = None):
+    def __init__(
+        self, log_every_n_steps: int = 500, tensorboard_writer: SummaryWriter = None
+    ):
+        self.log_every_n = log_every_n_steps
         self.tb_writer = tensorboard_writer
 
+        self.steps_since_last_log = 0
+        self.metrics = Counter()
+
     def log_metrics(self, metrics: Dict[str, float], step: int):
-        mlflow.log_metrics(metrics, step=step)
-        if self.tb_writer:
-            for k, v in metrics.items():
-                self.tb_writer.add_scalar(k, v, global_step=step)
+        # save metrics for later logging
+        self.metrics += metrics
+        self.steps_since_last_log += 1
+
+        if self.steps_since_last_log == self.log_every_n:
+            # log average metrics
+            avg_metrics = {k: v / self.log_every_n for k, v in self.metrics.items()}
+            # reset counter
+            self.metrics = Counter()
+            self.steps_since_last_log = 0
+
+            # actually log the metrics
+            mlflow.log_metrics(avg_metrics, step=step)
+            if self.tb_writer:
+                for k, v in avg_metrics.items():
+                    self.tb_writer.add_scalar(k, v, global_step=step)
 
 
 def update_artifacts_path():

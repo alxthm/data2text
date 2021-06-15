@@ -1,4 +1,5 @@
 import logging
+from collections import Counter
 
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -56,10 +57,11 @@ class Seq2seqTrainer:
         self.evaluator = evaluator
 
         # logging
-        self.logger = MyLogger(tensorboard_writer)
+        self.logger = MyLogger(tensorboard_writer=tensorboard_writer)
 
     def train(self):
         global_step = 0
+        training_metrics = Counter()
         logging.info("Training...")
         logging.info(f"     num_epochs: {self.num_epochs}")
 
@@ -91,8 +93,8 @@ class Seq2seqTrainer:
                 self.logger.log_metrics(
                     {
                         "train/loss": loss.item(),
-                        "learning_rate": self.lr_scheduler.get_last_lr()[0],
-                        "epoch": epoch,
+                        "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
+                        "train/epoch": epoch,
                     },
                     step=global_step,
                 )
