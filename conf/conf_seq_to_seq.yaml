@@ -6,11 +6,11 @@ fast_dev_run: False
 model: "t5-base"
 epochs: 10
 lr: 1.0e-4
-batch_size_train: 16
+batch_size_train: 8
 
 # validation
 num_beams: 8
-batch_size_val: 16
+batch_size_val: 8
 
 # logging
 checkpoint: False

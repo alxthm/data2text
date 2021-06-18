@@ -183,7 +183,9 @@ class Evaluator:
                     f"{label_sentence}\n"
                 )
                 if error_log:
-                    # predicted vs ground truth sets of relations
+                    # predicted graph did not match exactly target graph
+                    results["graph_errors"] += 1
+                    # log predicted vs ground truth sets of relations
                     logs += error_log
 
         # compute metrics
@@ -197,6 +199,7 @@ class Evaluator:
             num_predicted=results["predicted_relations"],
             num_gt=results["gt_relations"],
         )
+        n = results["num_sentences"]
         metrics = {
             f"{split}/entity_f1": entity_f1,
             f"{split}/entity_precision": entity_precision,
@@ -205,7 +208,8 @@ class Evaluator:
             f"{split}/relation_precision": relation_precision,
             f"{split}/relation_recall": relation_recall,
             # % errors when parsing model output
-            f"{split}/format_error": results["wrong_format"] / results["num_sentences"],
+            f"{split}/format_error": results["wrong_format"] / n,
+            f"{split}/graph_acc": (n - results["graph_errors"]) / n,
         }
         return metrics, logs
 
