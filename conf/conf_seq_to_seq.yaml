@@ -1,5 +1,5 @@
 seed: 0
-supervised: False
+mode: "g2t"
 fast_dev_run: False
 
 # training

@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, T5ForConditionalGeneration
 
 from src.data.datasets import WebNLG
-from src.data.formatting import OutputFormat
+from src.data.formatting import GraphFormat, Mode
 from src.eval import Evaluator
 from src.train import Seq2seqTrainer
 from src.utils import (
@@ -36,7 +36,7 @@ def train(timestamp: str):
 
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
     mlflow.set_experiment("al.thomas_d2t_3")
-    run_name = f"{timestamp}-{'sup' if conf.supervised else 'unsup'}-{conf.model}"
+    run_name = f"{timestamp}-{conf.mode}-{conf.model}"
     tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
     logging.info(f"run_name: {run_name}\n")
 
@@ -49,9 +49,9 @@ def train(timestamp: str):
         # (regular, not special tokens like <pad> since we need them after cleaning output sentence)
         tokenizer.add_tokens(
             [
-                OutputFormat.HEAD_TOKEN,
-                OutputFormat.TYPE_TOKEN,
-                OutputFormat.TAIL_TOKEN,
+                GraphFormat.HEAD_TOKEN,
+                GraphFormat.TYPE_TOKEN,
+                GraphFormat.TAIL_TOKEN,
             ]
         )
 
@@ -71,6 +71,7 @@ def train(timestamp: str):
         logging.info(f"\n{summary}")
 
         evaluator = Evaluator(
+            mode=Mode(conf.mode),
             val_dataset=val_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
@@ -85,6 +86,7 @@ def train(timestamp: str):
         # train model
         trainer = Seq2seqTrainer(
             model=model,
+            mode=Mode(conf.mode),
             train_dataset=train_dataset,
             evaluator=evaluator,
             learning_rate=conf.lr,

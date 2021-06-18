@@ -3,7 +3,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from src.data.datasets import WebNLG
-from src.data.formatting import Example, Relation, Entity, RelationType, OutputFormat
+from src.data.formatting import Example, Relation, Entity, RelationType, GraphFormat
 
 
 def test_output_format():
@@ -14,9 +14,9 @@ def test_output_format():
             Entity("Abilene Regional Airport"),
         )
     ]
-    output_format = OutputFormat()
+    output_format = GraphFormat()
     assert (
-        output_format.format_output(graph)
+        output_format.serialize_graph(graph)
         == "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
     )
     graph = [
@@ -31,9 +31,9 @@ def test_output_format():
             Entity("France"),
         ),
     ]
-    output_format = OutputFormat()
+    output_format = GraphFormat()
     assert (
-        output_format.format_output(graph)
+        output_format.serialize_graph(graph)
         == "[HEAD] Abilene , Texas [TYPE] city served "
         "[TAIL] Abilene Regional Airport [HEAD] Mbappe [TYPE] best player [TAIL] France"
     )
@@ -44,8 +44,8 @@ def test_run_inference():
         "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
         "[HEAD] Abilene [TYPE] served [TAIL] Regional Airport"
     )
-    output_format = OutputFormat()
-    pred_ent, pred_rel, error = output_format.run_inference(output_sentence)
+    output_format = GraphFormat()
+    pred_ent, pred_rel, error = output_format.extract_raw_graph(output_sentence)
     assert not error
     assert pred_ent == {
         "Abilene , Texas",
@@ -64,8 +64,8 @@ def test_run_inference2():
         "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
         "[HEAD] Abilene served [TAIL] Regional Airport"
     )
-    output_format = OutputFormat()
-    pred_ent, pred_rel, error = output_format.run_inference(output_sentence)
+    output_format = GraphFormat()
+    pred_ent, pred_rel, error = output_format.extract_raw_graph(output_sentence)
     assert error
     assert pred_ent == {"Abilene , Texas", "Abilene Regional Airport"}
     assert pred_rel == {

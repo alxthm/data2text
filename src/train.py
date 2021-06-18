@@ -1,6 +1,8 @@
 import logging
 from collections import Counter
+from enum import Enum
 
+import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -11,16 +13,21 @@ from transformers import (
 )
 
 from src.data.datasets import WebNLG
+from src.data.formatting import Mode
 from src.eval import Evaluator
 from src.utils import (
     MyLogger,
 )
 
 
+
+
+
 class Seq2seqTrainer:
     def __init__(
         self,
         model,
+        mode: Mode,
         train_dataset: WebNLG,
         evaluator: Evaluator,
         learning_rate: float,
@@ -30,6 +37,7 @@ class Seq2seqTrainer:
         max_training_steps: int = -1,
     ):
         self.model = model
+        self.mode = mode
         self.device = model.device
 
         # training
@@ -73,16 +81,28 @@ class Seq2seqTrainer:
                     break
 
                 # move data to device
-                input_ids = batch["input_ids"].to(self.device)
-                attention_mask = batch["attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device)
+                text_ids = batch["text_ids"].to(self.device)
+                att_mask_text = batch["att_mask_text"].to(self.device)
+                graph_ids = batch["graph_ids"].to(self.device)
+                att_mask_graph = batch["att_mask_graph"].to(self.device)
 
                 # training step
-                outputs = self.model(
-                    input_ids, attention_mask=attention_mask, labels=labels
-                )
-                loss = outputs.loss
-                loss.backward()
+                if self.mode == Mode.t2g:
+                    loss_g2t = torch.tensor(0)
+                    t2g_outputs = self.model(
+                        input_ids=text_ids, attention_mask=att_mask_text, labels=graph_ids
+                    )
+                    loss_t2g = t2g_outputs.loss
+                    loss_t2g.backward()
+                elif self.mode == Mode.g2t:
+                    loss_t2g = torch.tensor(0)
+                    g2t_outputs = self.model(
+                        input_ids=graph_ids, attention_mask=att_mask_graph, labels=text_ids
+                    )
+                    loss_g2t = g2t_outputs.loss
+                    loss_g2t.backward()
+                else:
+                    raise ValueError
 
                 self.optimizer.step()
                 self.lr_scheduler.step()
@@ -92,7 +112,8 @@ class Seq2seqTrainer:
                 # log training info
                 self.logger.log_metrics(
                     {
-                        "train/loss": loss.item(),
+                        "train/loss_t2g": loss_t2g.item(),
+                        "train/loss_g2t": loss_g2t.item(),
                         "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
                         "train/epoch": epoch,
                     },
