@@ -23,6 +23,9 @@ class Relation:
     def __repr__(self):
         return f"({self.head.text} -> {self.type.short} -> {self.tail.text})"
 
+    def to_tuple(self):
+        return self.head.text, self.type.natural, self.tail.text
+
 
 @dataclass
 class Example:
@@ -78,6 +81,7 @@ class OutputFormat:
         Examples:
             output_sentence:
                 '[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport'
+
             predicted_entities:
                 {"Abilene , Texas", "Abilene Regional Airport"}
             predicted_relations:

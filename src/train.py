@@ -10,6 +10,7 @@ from transformers import (
     default_data_collator,
 )
 
+from src.data.datasets import WebNLG
 from src.eval import Evaluator
 from src.utils import (
     MyLogger,
@@ -20,7 +21,7 @@ class Seq2seqTrainer:
     def __init__(
         self,
         model,
-        train_dataset,
+        train_dataset: WebNLG,
         evaluator: Evaluator,
         learning_rate: float,
         batch_size: int,

@@ -79,7 +79,7 @@ def train(timestamp: str):
             num_beams=conf.num_beams,
             log_path=project_dir / f"models/{run_name}",
             tensorboard_writer=tb_writer,
-            # limit_samples=10,
+            limit_samples=10 if conf.fast_dev_run else False,
         )
 
         # train model
@@ -91,7 +91,7 @@ def train(timestamp: str):
             batch_size=conf.batch_size_train,
             num_epochs=conf.epochs,
             tensorboard_writer=tb_writer,
-            # max_training_steps=10,
+            max_training_steps=10 if conf.fast_dev_run else -1,
         )
         trainer.train()
 

@@ -48,7 +48,7 @@ class MyLogger:
     """
 
     def __init__(
-        self, log_every_n_steps: int = 500, tensorboard_writer: SummaryWriter = None
+        self, tensorboard_writer: SummaryWriter = None, log_every_n_steps: int = 500
     ):
         self.log_every_n = log_every_n_steps
         self.tb_writer = tensorboard_writer
@@ -122,6 +122,17 @@ def mlflow_log_src_and_config(conf, project_dir: Path):
 def camel_case_to_natural_text(s: str):
     # https://stackoverflow.com/a/44969381
     return "".join([" " + c.lower() if c.isupper() else c for c in s]).lstrip(" ")
+
+
+def get_precision_recall_f1(num_correct: int, num_predicted: int, num_gt: int):
+    assert 0 <= num_correct <= num_predicted
+    assert 0 <= num_correct <= num_gt
+
+    precision = num_correct / num_predicted if num_predicted > 0 else 0.0
+    recall = num_correct / num_gt if num_gt > 0 else 0.0
+    f1 = 2.0 / (1.0 / precision + 1.0 / recall) if num_correct > 0 else 0.0
+
+    return precision, recall, f1
 
 
 # from https://github.com/PyTorchLightning/pytorch-lightning/

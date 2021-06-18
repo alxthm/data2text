@@ -1,6 +1,7 @@
 import logging
+from collections import Counter
 from pathlib import Path
-from typing import Union
+from typing import Union, Set, Tuple
 
 import mlflow
 from sklearn.metrics import f1_score, accuracy_score
@@ -16,7 +17,8 @@ from transformers import (
 )
 
 from src.data.datasets import WebNLG
-from src.utils import MyLogger
+from src.data.formatting import Example
+from src.utils import MyLogger, get_precision_recall_f1
 
 
 class EvalCallback(TrainerCallback):
@@ -72,7 +74,7 @@ class Evaluator:
         self.num_beams = num_beams
         self.max_output_length = val_dataset.max_output_length
 
-        self.logger = MyLogger(tensorboard_writer)
+        self.logger = MyLogger(tensorboard_writer=tensorboard_writer)
         self.log_path = log_path
         self.limit_samples = limit_samples  # do not use all entire validation dataset
 
@@ -97,9 +99,13 @@ class Evaluator:
         self.logger.log_metrics(metrics=res, step=epoch)
 
         # save predictions logs to mlflow
-        with open(self.log_path / f"t2g_{split}_{epoch}.txt", "w", encoding="utf-8") as f:
+        with open(
+            self.log_path / f"t2g_{split}_{epoch}.txt", "w", encoding="utf-8"
+        ) as f:
             f.write(logs)
-        mlflow.log_artifact(str(self.log_path / f"t2g_{split}_{epoch}.txt"), f"t2g_out/{epoch}")
+        mlflow.log_artifact(
+            str(self.log_path / f"t2g_{split}_{epoch}.txt"), f"t2g_out/{epoch}"
+        )
 
     def run_evaluation(self, split: str):
         """
@@ -112,56 +118,18 @@ class Evaluator:
         else:
             raise ValueError
 
-        (
-            entities_pred,
-            entities_true,
-            relations_pred,
-            relations_true,
-            format_errors,
-            logs,
-        ) = self.get_predictions(dataset)
-
-        # compute and return scores
-        entity_f1_micro = f1_score(entities_true, entities_pred, average="micro")
-        entity_f1_macro = f1_score(entities_true, entities_pred, average="macro")
-        entity_acc = accuracy_score(entities_true, entities_pred)
-        relation_f1_micro = f1_score(relations_true, relations_pred, average="micro")
-        relation_f1_macro = f1_score(relations_true, relations_pred, average="macro")
-        relation_acc = accuracy_score(relations_true, relations_pred)
-
-        res = {
-            f"{split}/entity_acc": entity_acc,
-            f"{split}/entity_f1_micro": entity_f1_micro,
-            f"{split}/entity_f1_macro": entity_f1_macro,
-            f"{split}/relation_acc": relation_acc,
-            f"{split}/relation_f1_micro": relation_f1_micro,
-            f"{split}/relation_f1_macro": relation_f1_macro,
-            # % errors when parsing model output
-            f"{split}/format_error": format_errors / len(entities_true),
-        }
-
-        return res, logs
-
-    def get_predictions(self, dataset: WebNLG):
-        """
-        Do inference on dataset, and return predicted & ground truth relations/entities
-        """
         dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=False,  # if using shuffle and dataset.get_example(id), make sure that id is correct
             collate_fn=default_data_collator,
         )
 
-        format_errors = 0
-        entities_pred = []
-        entities_true = []
-        relations_pred = []
-        relations_true = []
+        results = Counter()
         logs = ""
 
         for i, inputs in tqdm(enumerate(dataloader), total=len(dataloader)):
-            if self.limit_samples and len(entities_true) > self.limit_samples:
+            if self.limit_samples and results["num_sentences"] > self.limit_samples:
                 # to speed up validation, do not consider all samples
                 break
 
@@ -195,40 +163,95 @@ class Evaluator:
                 # parse output sequence, obtain sets of predicted entities and relations
                 parsed_output = dataset.output_format.run_inference(output_sentence)
                 predicted_entities, predicted_relations, wrong_format = parsed_output
-                entities_pred.append(str(predicted_entities))
-                relations_pred.append(str(predicted_relations))
 
-                # load ground truth entities and relations (as str and tuple of str)
-                gt_entities = set()
-                gt_relations = set()
-                for relation in example.graph:
-                    gt_entities.update({relation.head.text, relation.tail.text})
-                    gt_relations.add(
-                        (relation.head.text, relation.type.natural, relation.tail.text)
-                    )
-                # use a set so the order of entities/relations does not matter
-                # and then convert to str (with a determined order) for evaluation
-                entities_true.append(str(gt_entities))
-                relations_true.append(str(gt_relations))
-
+                # compare predictions to ground truth
+                new_results, error_log = self.evaluate_example(
+                    example, predicted_entities, predicted_relations
+                )
                 if wrong_format:
-                    format_errors += 1
+                    new_results["wrong_format"] = 1
+                # update statistics: number of correct/pred/gt relations, etc
+                results += new_results
 
-                # text to log
+                # log example
                 logs += (
                     f"[{current_id}] input / output / label (+pred/gt rel)\n"
                     f"{input_sentence}\n"
                     f"{output_sentence}\n"
                     f"{label_sentence}\n"
                 )
-                if predicted_relations != gt_relations:
-                    logs += "error\n" f"{predicted_relations}\n" f"{gt_relations}\n"
+                if error_log:
+                    # predicted vs ground truth sets of relations
+                    logs += error_log
 
-        return (
-            entities_pred,
-            entities_true,
-            relations_pred,
-            relations_true,
-            format_errors,
-            logs,
+        # compute metrics
+        entity_precision, entity_recall, entity_f1 = get_precision_recall_f1(
+            num_correct=results["correct_entities"],
+            num_predicted=results["predicted_entities"],
+            num_gt=results["gt_entities"],
         )
+        relation_precision, relation_recall, relation_f1 = get_precision_recall_f1(
+            num_correct=results["correct_relations"],
+            num_predicted=results["predicted_relations"],
+            num_gt=results["gt_relations"],
+        )
+        metrics = {
+            f"{split}/entity_f1": entity_f1,
+            f"{split}/entity_precision": entity_precision,
+            f"{split}/entity_recall": entity_recall,
+            f"{split}/relation_f1": relation_f1,
+            f"{split}/relation_precision": relation_precision,
+            f"{split}/relation_recall": relation_recall,
+            # % errors when parsing model output
+            f"{split}/format_error": results["wrong_format"] / results["num_sentences"],
+        }
+        return metrics, logs
+
+    def evaluate_example(
+        self,
+        example: Example,
+        predicted_entities: Set[str],
+        predicted_relations: Set[Tuple[str]],
+    ):
+        """
+        Evaluate model predictions on a single example of this dataset.
+
+        Return the number of predicted/ground-truth/correct relations (and entities) for
+        this example. This can then be used to compute f1 scores.
+
+        Ground truth and predicted triples are matched using python sets.
+        """
+        # load ground truth entities and relations
+        gt_entities = set()
+        gt_relations = set()
+        for relation in example.graph:
+            gt_entities.add(relation.head.text)
+            gt_entities.add(relation.tail.text)
+            gt_relations.add(relation.to_tuple())
+
+        # filter correct entities and relations
+        correct_entities = predicted_entities & gt_entities
+        correct_relations = predicted_relations & gt_relations
+
+        assert len(correct_entities) <= len(predicted_entities)
+        assert len(correct_entities) <= len(gt_entities)
+        assert len(correct_relations) <= len(predicted_relations)
+        assert len(correct_relations) <= len(gt_relations)
+
+        res = Counter(
+            {
+                "num_sentences": 1,
+                "gt_entities": len(gt_entities),
+                "predicted_entities": len(predicted_entities),
+                "correct_entities": len(correct_entities),
+                "gt_relations": len(gt_relations),
+                "predicted_relations": len(predicted_relations),
+                "correct_relations": len(correct_relations),
+            }
+        )
+
+        error_log = None
+        if not len(correct_relations) == len(predicted_relations) == len(gt_relations):
+            error_log = "error\n" f"{predicted_relations}\n" f"{gt_relations}\n"
+
+        return res, error_log
