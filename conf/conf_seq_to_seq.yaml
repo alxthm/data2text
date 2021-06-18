@@ -3,8 +3,8 @@ supervised: False
 fast_dev_run: False
 
 # training
-model: "t5-small"
-epochs: 5
+model: "t5-base"
+epochs: 10
 lr: 1.0e-4
 batch_size_train: 16
 

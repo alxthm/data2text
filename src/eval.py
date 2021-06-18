@@ -74,7 +74,9 @@ class Evaluator:
         self.num_beams = num_beams
         self.max_output_length = val_dataset.max_output_length
 
-        self.logger = MyLogger(tensorboard_writer=tensorboard_writer)
+        self.logger = MyLogger(
+            tensorboard_writer=tensorboard_writer, log_every_n_steps=1
+        )
         self.log_path = log_path
         self.limit_samples = limit_samples  # do not use all entire validation dataset
 
