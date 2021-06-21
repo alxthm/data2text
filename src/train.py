@@ -1,6 +1,4 @@
 import logging
-from collections import Counter
-from enum import Enum
 
 import torch
 from torch.utils.data import DataLoader
@@ -18,9 +16,6 @@ from src.eval import Evaluator
 from src.utils import (
     MyLogger,
 )
-
-
-
 
 
 class Seq2seqTrainer:
@@ -90,14 +85,18 @@ class Seq2seqTrainer:
                 if self.mode == Mode.t2g:
                     loss_g2t = torch.tensor(0)
                     t2g_outputs = self.model(
-                        input_ids=text_ids, attention_mask=att_mask_text, labels=graph_ids
+                        input_ids=text_ids,
+                        attention_mask=att_mask_text,
+                        labels=graph_ids,
                     )
                     loss_t2g = t2g_outputs.loss
                     loss_t2g.backward()
                 elif self.mode == Mode.g2t:
                     loss_t2g = torch.tensor(0)
                     g2t_outputs = self.model(
-                        input_ids=graph_ids, attention_mask=att_mask_graph, labels=text_ids
+                        input_ids=graph_ids,
+                        attention_mask=att_mask_graph,
+                        labels=text_ids,
                     )
                     loss_g2t = g2t_outputs.loss
                     loss_g2t.backward()

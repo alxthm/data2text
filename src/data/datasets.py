@@ -15,7 +15,7 @@ from src.data.formatting import (
     Entity,
     RelationType,
     Example,
-    TextFormat,
+    # TextFormat,
     GraphFormat,
 )
 from src.utils import camel_case_to_natural_text

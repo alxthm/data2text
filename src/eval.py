@@ -6,6 +6,7 @@ from typing import Union, Set, Tuple, Dict
 import mlflow
 from datasets import load_metric, Metric
 from sklearn.metrics import f1_score, accuracy_score
+from tokenizers import Tokenizer
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -15,6 +16,7 @@ from transformers import (
     TrainerCallback,
     TrainerControl,
     TrainingArguments,
+    PreTrainedTokenizer,
 )
 
 from src.data.datasets import WebNLG
@@ -58,10 +60,11 @@ class Evaluator:
         mode: Mode,
         val_dataset: WebNLG,
         test_dataset: WebNLG,
-        tokenizer,
+        tokenizer: PreTrainedTokenizer,
         model,
         batch_size: int,
-        num_beams: int,
+        num_beams_t2g: int,
+        num_beams_g2t: int,
         log_path: Path,
         tensorboard_writer: SummaryWriter = None,
         limit_samples: Union[int, bool] = False,
@@ -74,7 +77,8 @@ class Evaluator:
         self.device = model.device
 
         self.batch_size = batch_size
-        self.num_beams = num_beams
+        self.num_beams_t2g = num_beams_t2g
+        self.num_beams_g2t = num_beams_g2t
         self.max_output_length = val_dataset.max_seq_length
 
         self.logger = MyLogger(tensorboard_writer=tensorboard_writer)
@@ -102,10 +106,11 @@ class Evaluator:
         self.logger.log_metrics(metrics=res, step=epoch)
 
         # save predictions logs to mlflow
-        file_path = self.log_path / f"t2g_{split}_{epoch}.txt"
+        mode = self.mode.value  # t2g, g2t, ...
+        file_path = self.log_path / f"{mode}_{split}_{epoch}.txt"
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(logs)
-        mlflow.log_artifact(str(file_path), f"t2g_out/{epoch}")
+        mlflow.log_artifact(str(file_path), f"{mode}_out/{epoch}")
 
     def run_evaluation(self, split: str):
         """
@@ -126,23 +131,25 @@ class Evaluator:
         )
 
         t2g_results = Counter()
-        g2t_metrics = {"bleu": load_metric("bleu")}
+        # use sacrebleu (a standardized version of BLEU, using a standard tokenizer)
+        # https://github.com/huggingface/datasets/issues/137
+        g2t_metrics = {"bleu": load_metric("sacrebleu"), "rouge": load_metric("rouge")}
         logs = ""
 
         for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-            if self.limit_samples and t2g_results["num_sentences"] > self.limit_samples:
+            if self.limit_samples and (i + 1) * self.batch_size > self.limit_samples:
                 # to speed up validation, do not consider all samples
                 break
 
             if self.mode == Mode.t2g:
                 batch_results, batch_logs = self.evaluate_t2g_batch(batch, i, dataset)
                 t2g_results += batch_results
-                logs += batch_logs
             elif self.mode == Mode.g2t:
                 # update metrics with batch predictions and reference texts
-                self.evaluate_g2t_batch(batch, g2t_metrics)
+                batch_logs = self.evaluate_g2t_batch(batch, i, g2t_metrics, dataset)
             else:
                 raise ValueError
+            logs += batch_logs
 
         if self.mode == Mode.t2g:
             metrics = self.compute_t2g_metrics(t2g_results)
@@ -185,7 +192,7 @@ class Evaluator:
         graph_predictions = self.model.generate(
             batch["text_ids"].to(self.device),
             max_length=self.max_output_length,
-            num_beams=self.num_beams,
+            num_beams=self.num_beams_t2g,
         )
 
         for j, (text_ids, graph_ids, graph_prediction) in enumerate(
@@ -281,20 +288,58 @@ class Evaluator:
 
         return res, error_log
 
-    def evaluate_g2t_batch(self, batch, g2t_metrics: Dict[str, Metric]):
+    def evaluate_g2t_batch(
+        self, batch, batch_id: int, g2t_metrics: Dict[str, Metric], dataset: WebNLG
+    ):
         # get raw batch predictions
-        text_predictions = self.model.generate(
+        text_predictions_ids = self.model.generate(
             batch["graph_ids"].to(self.device),
             max_length=self.max_output_length,
-            num_beams=self.num_beams,
+            num_beams=self.num_beams_g2t,
         )
-        for metric in g2t_metrics.values():
-            metric.add_batch(predictions=text_predictions, references=batch["text_ids"])
+        # transform predictions and references to plain text (detokenized)
+        text_predictions = self.tokenizer.batch_decode(
+            text_predictions_ids, skip_special_tokens=True
+        )
+        references = self.tokenizer.batch_decode(
+            batch["text_ids"], skip_special_tokens=True
+        )
+        # for each input text, a list of reference texts is expected for sacrebleu
+        g2t_metrics["bleu"].add_batch(
+            predictions=text_predictions, references=[[r] for r in references]
+        )
+        g2t_metrics["rouge"].add_batch(
+            predictions=text_predictions, references=references
+        )
+
+        # log predictions and reference texts
+        logs = ""
+        assert len(text_predictions) == len(references)
+        for j in range(len(text_predictions)):
+            current_id = self.batch_size * batch_id + j
+            example = dataset.get_example(current_id)
+            logs += (
+                f"[{current_id}] input graph / output / label / (raw)\n"
+                f"{example.graph}\n"
+                f"{text_predictions[j]}\n"
+                f"{references[j]}\n"
+                f"({example.text})\n"
+            )
+        return logs
 
     def compute_g2t_metrics(self, g2t_metrics: Dict[str, Metric]):
-        bleu_results = g2t_metrics["bleu"].compute()
+        bleu = g2t_metrics["bleu"]
+        n = len(bleu)  # number of stored examples in the metric
+        bleu_results = bleu.compute()
+        rouge_results = g2t_metrics["rouge"].compute()
+        # to match cyclegt evaluation, compute mean F1 score of rougeL metric
+        # (mid is the mean, see https://github.com/google-research/google-research/blob/master/rouge/scoring.py#L141)
+        rouge_score = rouge_results["rougeL"].mid.fmeasure
         return {
-            "bleu": bleu_results["bleu"],
-            "avg_predicted_len": bleu_results["translation_length"],
-            "avg_correct_len": bleu_results["reference_length"],
+            "bleu": bleu_results["score"],
+            "rouge_l": rouge_score,
+            # sys/ref_len is the length (in space separated tokens, i.e. words) of predicted/label sentences
+            # https://github.com/mjpost/sacrebleu/blob/5dfcaa3cee00039bcad7a12147b6d6976cb46f42/sacrebleu/metrics/bleu.py#L248
+            "avg_predicted_len": bleu_results["sys_len"] / n,
+            "avg_correct_len": bleu_results["ref_len"] / n,
         }
