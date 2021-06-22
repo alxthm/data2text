@@ -1,6 +1,12 @@
+from enum import Enum
 from typing import List, Tuple
 
 from dataclasses import dataclass
+
+class Mode(Enum):
+    t2g = "t2g"
+    g2t = "g2t"
+    # both_sup and both_unsup to add
 
 
 @dataclass
@@ -33,19 +39,19 @@ class Example:
     graph: List[Relation]
 
 
-class InputFormat:
-    prefix_t2g = "text to graph : "
+# class TextFormat:
+#     prefix_t2g = "text to graph : "
+#
+#     def format_input(self, text: str):
+#         return self.prefix_t2g + text
 
-    def format_input(self, text: str):
-        return self.prefix_t2g + text
 
-
-class OutputFormat:
+class GraphFormat:
     HEAD_TOKEN = "[HEAD]"
     TYPE_TOKEN = "[TYPE]"
     TAIL_TOKEN = "[TAIL]"
 
-    def format_output(self, graph: List[Relation]) -> str:
+    def serialize_graph(self, graph: List[Relation]) -> str:
         """
         Format graph (list of relations) into a string
 
@@ -70,7 +76,7 @@ class OutputFormat:
             )
         return " ".join(seralized_graphs)
 
-    def run_inference(self, output_sentence: str) -> Tuple[set, set, bool]:
+    def extract_raw_graph(self, output_sentence: str) -> Tuple[set, set, bool]:
         """
         Parse raw output sentence, extract entities and relations
 

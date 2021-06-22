@@ -15,8 +15,8 @@ from src.data.formatting import (
     Entity,
     RelationType,
     Example,
-    InputFormat,
-    OutputFormat,
+    # TextFormat,
+    GraphFormat,
 )
 from src.utils import camel_case_to_natural_text
 
@@ -27,8 +27,7 @@ class WebNLG(Dataset):
         "val": "raw/webnlg/dev.json",
         "test": "raw/webnlg/test.json",
     }
-    max_input_length = 256
-    max_output_length = 256
+    max_seq_length = 256
 
     def __init__(
         self,
@@ -46,8 +45,8 @@ class WebNLG(Dataset):
         self.tokenizer = tokenizer
         self.split = split
 
-        self.input_format = InputFormat()
-        self.output_format = OutputFormat()
+        # self.text_format = TextFormat()
+        self.graph_format = GraphFormat()
 
         if not os.path.isfile(data_dir / "processed/webnlg_seq2seq/train.pth"):
             # if not already done, preprocess raw data and save it to disk
@@ -120,46 +119,46 @@ class WebNLG(Dataset):
 
         """
         # format text and graph into sequences
-        input_sentences = [
-            self.input_format.format_input(example.text) for example in examples
-        ]
-        output_sentences = [
-            self.output_format.format_output(example.graph) for example in examples
+        text_sentences = [example.text for example in examples]
+        graph_sentences = [
+            self.graph_format.serialize_graph(example.graph) for example in examples
         ]
 
-        input_tok = self.tokenizer.batch_encode_plus(
-            input_sentences,
-            max_length=self.max_input_length,
+        text_tok = self.tokenizer.batch_encode_plus(
+            text_sentences,
+            max_length=self.max_seq_length,
             return_tensors="pt",
             padding="max_length",
             truncation=True,
         )
-        self._warn_max_sequence_length(self.max_input_length, input_sentences, "input")
+        self._warn_max_sequence_length(self.max_seq_length, text_sentences, "input")
 
-        output_tok = self.tokenizer.batch_encode_plus(
-            output_sentences,
-            max_length=self.max_output_length,
+        graph_tok = self.tokenizer.batch_encode_plus(
+            graph_sentences,
+            max_length=self.max_seq_length,
             return_tensors="pt",
             padding="max_length",
             truncation=True,
         )
-        self._warn_max_sequence_length(
-            self.max_output_length, output_sentences, "output"
-        )
+        self._warn_max_sequence_length(self.max_seq_length, graph_sentences, "output")
 
         assert (
-            input_tok.input_ids.size(0) == output_tok.input_ids.size(0) == len(examples)
+            text_tok.input_ids.size(0) == graph_tok.input_ids.size(0) == len(examples)
         )
 
         features = []
-        for input_ids, att_mask, label_ids in zip(
-            input_tok.input_ids, input_tok.attention_mask, output_tok.input_ids
+        for text_ids, att_mask_text, graph_ids, att_mask_graph in zip(
+            text_tok.input_ids,
+            text_tok.attention_mask,
+            graph_tok.input_ids,
+            graph_tok.attention_mask,
         ):
             features.append(
                 {
-                    "input_ids": input_ids.tolist(),
-                    "attention_mask": att_mask.tolist(),
-                    "label_ids": label_ids.tolist(),
+                    "text_ids": text_ids.tolist(),
+                    "att_mask_text": att_mask_text.tolist(),
+                    "graph_ids": graph_ids.tolist(),
+                    "att_mask_graph": att_mask_graph.tolist(),
                 }
             )
 

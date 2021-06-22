@@ -1,15 +1,16 @@
 seed: 0
-supervised: False
+mode: "g2t"
 fast_dev_run: False
 
 # training
 model: "t5-base"
-epochs: 10
+epochs: 5
 lr: 1.0e-4
 batch_size_train: 8
 
 # validation
-num_beams: 8
+num_beams_t2g: 8
+num_beams_g2t: 5
 batch_size_val: 8
 
 # logging
