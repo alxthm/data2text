@@ -227,8 +227,6 @@ class Evaluator:
             )
             if wrong_format:
                 new_results["wrong_format"] = 1
-            # update statistics: number of correct/pred/gt relations, etc
-            batch_results += new_results
 
             # log example
             logs += (
@@ -242,6 +240,9 @@ class Evaluator:
                 new_results["graph_errors"] += 1
                 # log predicted vs ground truth sets of relations
                 logs += error_log
+
+            # update statistics: number of correct/pred/gt relations, etc
+            batch_results += new_results
 
         return batch_results, logs
 
