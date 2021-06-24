@@ -1,4 +1,5 @@
 import logging
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Union, Set, Tuple, Dict
@@ -21,7 +22,7 @@ from transformers import (
 
 from src.data.datasets import WebNLG
 from src.data.formatting import Example, Mode
-from src.utils import MyLogger, get_precision_recall_f1
+from src.utils import MyLogger
 
 
 class EvalCallback(TrainerCallback):
@@ -350,3 +351,55 @@ class Evaluator:
             "avg_predicted_len": bleu_results["sys_len"] / n,
             "avg_correct_len": bleu_results["ref_len"] / n,
         }
+
+
+def get_precision_recall_f1(num_correct: int, num_predicted: int, num_gt: int):
+    assert 0 <= num_correct <= num_predicted
+    assert 0 <= num_correct <= num_gt
+
+    precision = num_correct / num_predicted if num_predicted > 0 else 0.0
+    recall = num_correct / num_gt if num_gt > 0 else 0.0
+    f1 = 2.0 / (1.0 / precision + 1.0 / recall) if num_correct > 0 else 0.0
+
+    return precision, recall, f1
+
+
+def eval_bleu_perl(pred_file: str, dataset: str) -> float:
+    """
+    pred_file: 'models/RUN_ID/predictions_all.txt'
+    dataset: can be 'train', 'val' or 'test_XXX' where XXX is 'both', 'seen' or 'unseen'
+    """
+    project_dir = Path(__file__).resolve().parents[1]
+    folder_data = str(project_dir / "data/processed/webnlg_eval")
+    pred_file = str(project_dir / pred_file)
+
+    cmd_string = (
+        f"perl {str(project_dir)}/src/multi-bleu.perl -lc "
+        f"{folder_data}/{dataset}.target_eval "
+        f"{folder_data}/{dataset}.target2_eval "
+        f"{folder_data}/{dataset}.target3_eval "
+        f"< {pred_file} > {pred_file.replace('txt', 'bleu')}"
+    )
+
+    os.system(cmd_string)
+
+    # format:
+    # BLEU = 59.70, 87.5/67.9/52.7/41.5 (BP=0.994, ratio=0.994, hyp_len=42342, ref_len=42579)
+    bleu_info = open(pred_file.replace("txt", "bleu"), "r").readlines()[0].strip()
+
+    bleu_score = float(bleu_info.split(",")[0].replace("BLEU = ", ""))
+    return bleu_score
+
+
+def eval_bleu_test():
+    return {
+        "bleu_all": eval_bleu_perl(
+            "models/ribeiro/webnlg-all-t5-large.txt", "test_both"
+        ),
+        "bleu_seen": eval_bleu_perl(
+            "models/ribeiro/webnlg-seen-t5-large.txt", "test_seen"
+        ),
+        "bleu_unseen": eval_bleu_perl(
+            "models/ribeiro/webnlg-unseen-t5-large.txt", "test_unseen"
+        ),
+    }
