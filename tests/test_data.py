@@ -2,13 +2,13 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-from src.data.datasets import WebNLG
-from src.data.formatting import Example, Relation, Entity, RelationType, GraphFormat
+from src.data.datasets import Seq2seqDataset
+from src.data.formatting import Example, Triple, Entity, RelationType, GraphFormat
 
 
 def test_output_format():
     graph = [
-        Relation(
+        Triple(
             Entity("Abilene , Texas"),
             RelationType(short="cityServed", natural="city served"),
             Entity("Abilene Regional Airport"),
@@ -20,12 +20,12 @@ def test_output_format():
         == "[HEAD] Abilene , Texas [TYPE] city served [TAIL] Abilene Regional Airport"
     )
     graph = [
-        Relation(
+        Triple(
             Entity("Abilene , Texas"),
             RelationType(short="cityServed", natural="city served"),
             Entity("Abilene Regional Airport"),
         ),
-        Relation(
+        Triple(
             Entity("Mbappe"),
             RelationType(short="bestPlayer", natural="best player"),
             Entity("France"),
@@ -79,7 +79,7 @@ def test_webnlg_dataset():
         Example(
             text="Abilene , Texas is served by the Abilene Regional Airport .",
             graph=[
-                Relation(
+                Triple(
                     Entity("Abilene Regional Airport"),
                     RelationType(short="cityServed", natural="city served"),
                     Entity("Abilene , Texas"),
@@ -89,7 +89,7 @@ def test_webnlg_dataset():
         Example(
             text="serving size for the Barny Cakes is 30.0 g .",
             graph=[
-                Relation(
+                Triple(
                     Entity("Barny Cakes"),
                     RelationType(short="servingSize", natural="serving size"),
                     Entity("30.0 g"),
@@ -119,7 +119,7 @@ def test_webnlg_dataset():
 
     project_dir = Path(__file__).resolve().parents[1]
     tokenizer = AutoTokenizer.from_pretrained("t5-small")
-    webnlg = WebNLG(data_dir=project_dir / "data", split="train", tokenizer=tokenizer)
+    webnlg = Seq2seqDataset(data_dir=project_dir / "data", split="train", tokenizer=tokenizer)
     examples = webnlg.construct_examples(fake_raw_data)
     assert examples == examples_to_match
 
