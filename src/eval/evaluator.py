@@ -130,6 +130,7 @@ class EvaluatorWebNLG:
             lng="en",
             metrics="bleu,meteor,bert",
         )
+        metrics = {f"{split}/{k}": v for k, v in metrics.items()}
         return metrics, logs
 
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
