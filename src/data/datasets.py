@@ -208,31 +208,38 @@ class WebNLG2020(Seq2seqDataset):
     dataset_name = "webnlg2020"
 
     def load_raw_dataset(self, split: str):
-        if "test" in split:
-            split = "test"
-
+        split_ = "test" if "test" in split else split
         dataset = load_dataset(
             "web_nlg",
             name="release_v3.0_en",
-            split=split,
+            split=split_,
             ignore_verifications=True,  # https://github.com/huggingface/datasets/issues/2553
         )
+
         if "test" in split:
+            # take g2t test set (not t2g)
             dataset = dataset.filter(
                 lambda example: example["test_category"]
                 == "rdf-to-text-generation-test-data-with-refs-en"
             )
+            # to compute splits for test seen/unseen datasets, filter and keep only examples in the right category
+            path = (
+                self.data_dir
+                / "raw/webnlg/rdf-to-text-generation-test-instance-types.json"
+            )
+            with open(path) as f:
+                # for each example in test set, which category (seen/unseen)
+                test_instance_types = json.load(f)
+            dataset = dataset.filter(
+                lambda example: self.is_in_test_split(
+                    example["eid"], split, test_instance_types
+                )
+            )
+
         return dataset
 
     def construct_examples(self, raw_dataset, split: str):
         logging.info(f"[{split}] Constructing examples...")
-
-        # to compute splits for test seen/unseen datasets, make sure the example is in
-        # the right category
-        with open(
-            self.data_dir / "raw/webnlg/rdf-to-text-generation-test-instance-types.json"
-        ) as f:
-            self.test_instance_types = json.load(f)
 
         examples = []
         # for webnlg, keep a list of example ids corresponding to unique graphs
@@ -240,8 +247,6 @@ class WebNLG2020(Seq2seqDataset):
         # to be used during g2t evaluation (to make 1 prediction/graph)
         unique_graph_ids = []
         for entry in tqdm(raw_dataset):
-            if "test" in split and not self.is_in_test_split(entry["eid"], split):
-                continue
             # todo: make sure we process the text correctly, like
             #   - https://github.com/QipengGuo/P2_WebNLG2020/blob/main/main.py
             #   - https://github.com/UKPLab/plms-graph2text/blob/master/webnlg/data/generate_input_webnlg.py
@@ -297,7 +302,7 @@ class WebNLG2020(Seq2seqDataset):
             with open(ref_dir / f"{split}_{str(j)}.txt", "w+", encoding="utf-8") as f:
                 f.write("".join(out))
 
-    def is_in_test_split(self, example_id, split):
+    def is_in_test_split(self, example_id, split, test_instance_types):
         """
         Return True if the example belongs to this test split
         """
@@ -308,6 +313,6 @@ class WebNLG2020(Seq2seqDataset):
             "type2": "test_unseen_ent",
             "type3": "test_unseen_cat",
         }
-        example_type = self.test_instance_types[example_id]
+        example_type = test_instance_types[example_id]
         example_split = types_to_split[example_type]
         return example_split == split
