@@ -10,9 +10,9 @@ from transformers import (
     default_data_collator,
 )
 
-from src.data.datasets import WebNLG
+from src.data.datasets import Seq2seqDataset
 from src.data.formatting import Mode
-from src.eval import Evaluator
+from src.eval.evaluator import EvaluatorWebNLG
 from src.utils import (
     MyLogger,
 )
@@ -23,8 +23,8 @@ class Seq2seqTrainer:
         self,
         model,
         mode: Mode,
-        train_dataset: WebNLG,
-        evaluator: Evaluator,
+        train_dataset: Seq2seqDataset,
+        evaluator: EvaluatorWebNLG,
         learning_rate: float,
         batch_size: int,
         num_epochs: int,
@@ -120,7 +120,7 @@ class Seq2seqTrainer:
                 )
 
             # evaluate after each epoch
-            self.evaluator.evaluate_and_log(epoch, "val")
+            self.evaluator.evaluate_dev(epoch)
 
         # final evaluation, on test set
-        self.evaluator.evaluate_and_log(0, "test")
+        self.evaluator.evaluate_test()

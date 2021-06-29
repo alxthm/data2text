@@ -21,22 +21,22 @@ class RelationType:
 
 
 @dataclass
-class Relation:
+class Triple:
     head: Entity
-    type: RelationType
+    rel: RelationType
     tail: Entity
 
     def __repr__(self):
-        return f"({self.head.text} -> {self.type.short} -> {self.tail.text})"
+        return f"({self.head.text} -> {self.rel.short} -> {self.tail.text})"
 
     def to_tuple(self):
-        return self.head.text, self.type.natural, self.tail.text
+        return self.head.text, self.rel.natural, self.tail.text
 
 
 @dataclass
 class Example:
     text: str  # plain text sentence
-    graph: List[Relation]
+    graph: List[Triple]
 
 
 # class TextFormat:
@@ -51,7 +51,7 @@ class GraphFormat:
     TYPE_TOKEN = "[TYPE]"
     TAIL_TOKEN = "[TAIL]"
 
-    def serialize_graph(self, graph: List[Relation]) -> str:
+    def serialize_graph(self, graph: List[Triple]) -> str:
         """
         Format graph (list of relations) into a string
 
@@ -61,16 +61,16 @@ class GraphFormat:
 
         """
         seralized_graphs = []
-        for r in graph:
+        for triple in graph:
             seralized_graphs.append(
                 " ".join(
                     [
                         self.HEAD_TOKEN,
-                        r.head.text,
+                        triple.head.text,
                         self.TYPE_TOKEN,
-                        r.type.natural,
+                        triple.rel.natural,
                         self.TAIL_TOKEN,
-                        r.tail.text,
+                        triple.tail.text,
                     ]
                 )
             )

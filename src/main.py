@@ -9,9 +9,9 @@ from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, T5ForConditionalGeneration
 
-from src.data.datasets import WebNLG
+from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat, Mode
-from src.eval import Evaluator
+from src.eval.evaluator import EvaluatorWebNLG
 from src.train import Seq2seqTrainer
 from src.utils import (
     WarningsFilter,
@@ -57,9 +57,11 @@ def train(timestamp: str):
 
         # load data
         data_dir = project_dir / "data"
-        train_dataset = WebNLG(data_dir=data_dir, split="train", tokenizer=tokenizer)
-        val_dataset = WebNLG(data_dir=data_dir, split="val", tokenizer=tokenizer)
-        test_dataset = WebNLG(data_dir=data_dir, split="test", tokenizer=tokenizer)
+        datasets = {
+            split: WebNLG2020(data_dir=data_dir, split=split, tokenizer=tokenizer)
+            for split in WebNLG2020.splits
+        }
+        train_dataset = datasets["train"]
 
         # prepare model
         model = T5ForConditionalGeneration.from_pretrained(conf.model)
@@ -70,10 +72,9 @@ def train(timestamp: str):
         summary = ModelSummary(model, mode="top")
         logging.info(f"\n{summary}")
 
-        evaluator = Evaluator(
+        evaluator = EvaluatorWebNLG(
             mode=Mode(conf.mode),
-            val_dataset=val_dataset,
-            test_dataset=test_dataset,
+            datasets=datasets,
             tokenizer=tokenizer,
             model=model,
             batch_size=conf.batch_size_val,
