@@ -123,10 +123,11 @@ class EvaluatorWebNLG:
 
         data_dir = self.log_path / "../../data"
         refs_path = data_dir / f"processed/{dataset.dataset_name}/ref/{split}_<id>.txt"
+        num_refs = 3 if split == "test_unseen_ent" else 4
         metrics = run_webnlg_g2t_eval(
             refs_path=str(refs_path.resolve()),
             hyps_path=hyps_path,
-            num_refs=4,
+            num_refs=num_refs,
             lng="en",
             metrics="bleu,meteor,bert",
         )
