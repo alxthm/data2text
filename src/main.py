@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, T5ForConditionalGeneration
 from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat, Mode
 from src.eval.evaluator import EvaluatorWebNLG
-from src.train import Seq2seqTrainer
+from src.trainer import Seq2seqTrainer
 from src.utils import (
     WarningsFilter,
     seed_everything,
