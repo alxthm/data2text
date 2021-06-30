@@ -281,7 +281,7 @@ class WebNLG2020(Seq2seqDataset):
         ref_dir = self.data_dir / f"processed/{self.dataset_name}/ref"
         os.makedirs(ref_dir, exist_ok=True)
 
-        # create reference files like
+        # create reference text files without any processing, like
         # https://gitlab.com/webnlg/corpus-reader/-/blob/master/generate_references.py
         target_out = []
         for entry in raw_dataset:
@@ -299,6 +299,9 @@ class WebNLG2020(Seq2seqDataset):
                     out.append(f"{entry_refs[j]}\n")
                 except IndexError:
                     out.append("\n")
+            # for the last line, don't consider the '\n', to avoid putting an additional
+            # empty line in the reference files
+            out[-1] = out[-1][:-1]
             with open(ref_dir / f"{split}_{str(j)}.txt", "w+", encoding="utf-8") as f:
                 f.write("".join(out))
 
