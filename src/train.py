@@ -122,5 +122,3 @@ class Seq2seqTrainer:
             # evaluate after each epoch
             self.evaluator.evaluate_dev(epoch)
 
-        # final evaluation, on test set
-        self.evaluator.evaluate_test()

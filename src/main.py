@@ -99,11 +99,15 @@ def train(timestamp: str):
         )
         trainer.train()
 
+        # evaluate on test set
+        #   todo: remove when tuning hyperparameters, to make sure we don't overfit on test set
+        evaluator.evaluate_test()
+
         # save model checkpoint
         if conf.checkpoint:
-            torch.save(model.state_dict(), f"/tmp/{run_name}_t2g_{conf.model}.pt")
+            torch.save(model.state_dict(), f"/tmp/{run_name}_model.pt")
             mlflow.log_artifact(
-                f"/tmp/{run_name}_t2g_{conf.model}.pt", f"t2g_{conf.model}.pt"
+                f"/tmp/{run_name}_model.pt", f"model.pt"
             )
 
 

@@ -54,10 +54,10 @@ class EvaluatorWebNLG:
         self.evaluate_and_log(epoch, split="dev")
 
     def evaluate_test(self):
-        self.evaluate_and_log(0, split="test_all")
-        self.evaluate_and_log(0, split="test_seen")
-        self.evaluate_and_log(0, split="test_unseen_ent")
-        self.evaluate_and_log(0, split="test_unseen_cat")
+        self.evaluate_and_log(-1, split="test_all")
+        self.evaluate_and_log(-1, split="test_seen")
+        self.evaluate_and_log(-1, split="test_unseen_ent")
+        self.evaluate_and_log(-1, split="test_unseen_cat")
 
     def evaluate_and_log(self, epoch, split: str):
         """
@@ -120,6 +120,7 @@ class EvaluatorWebNLG:
         hyps_path = self.log_path / f"text_pred_{self.mode.value}_{split}_{epoch}.txt"
         with open(hyps_path, "w", encoding="utf-8") as f:
             f.write("\n".join(text_predictions))
+        mlflow.log_artifact(str(hyps_path), f"g2t_pred/{split}_{epoch}")
 
         data_dir = self.log_path / "../../data"
         refs_path = data_dir / f"processed/{dataset.dataset_name}/ref/{split}_<id>.txt"
