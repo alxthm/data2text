@@ -132,6 +132,7 @@ class EvaluatorWebNLG:
             num_refs=num_refs,
             lng="en",
             metrics="bleu,meteor,bert",
+            # metrics="bleu,meteor,chrf++,ter,bert,bleurt",  # all official WebNLG2020 metrics
         )
         metrics = {f"{split}/{k}": v for k, v in metrics.items()}
         return metrics, logs

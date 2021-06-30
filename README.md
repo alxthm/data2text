@@ -25,7 +25,7 @@ cd src/eval/webnlg_g2t
 
 git clone https://github.com/google-research/bleurt.git
 cd bleurt
-#pip3 install . --user  # does not work?
+pip install .
 wget https://storage.googleapis.com/bleurt-oss/bleurt-base-128.zip
 unzip bleurt-base-128.zip
 rm bleurt-base-128.zip 

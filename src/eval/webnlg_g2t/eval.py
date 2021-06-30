@@ -40,7 +40,7 @@ Description:
 
     EXAMPLE:
         ENGLISH:
-            python3 eval.py -R data/en/references/reference_<id>.txt -H data/en/hypothesis.txt -nr 4 -m bleu,meteor,chrf++,ter,bert,bleurt
+            python3 eval.py -R "/home/al.thomas/sync/development/data2text/src/eval/webnlg_g2t/example_data/ref_2020/dev_<id>.txt" -H "/home/al.thomas/sync/development/data2text/src/eval/webnlg_g2t/example_data/text_pred_g2t_dev_0.txt" -nr 4 -m bleu,meteor,chrf++,ter,bert,bleurt
 """
 
 import argparse
@@ -266,7 +266,7 @@ def bert_score_(references, hypothesis, lng="en"):
 def bleurt(
     references, hypothesis, num_refs, checkpoint="metrics/bleurt/bleurt-base-128"
 ):
-    from src.eval.webnlg_g2t.metrics.bleurt import score as bleurt_score
+    from bleurt import score
 
     refs, cands = [], []
     for i, hyp in enumerate(hypothesis):
@@ -274,8 +274,8 @@ def bleurt(
             cands.append(hyp)
             refs.append(ref)
 
-    scorer = bleurt_score.BleurtScorer(checkpoint)
-    scores = scorer.score(refs, cands)
+    scorer = score.BleurtScorer(checkpoint)
+    scores = scorer.score(references=refs, candidates=cands)
     scores = [max(scores[i : i + num_refs]) for i in range(0, len(scores), num_refs)]
     return round(sum(scores) / len(scores), 2)
 
@@ -330,7 +330,11 @@ def run(
 
 if __name__ == "__main__":
     FORMAT = "%(levelname)s: %(asctime)-15s - %(message)s"
-    logging.basicConfig(filename="eval.log", level=logging.INFO, format=FORMAT)
+    logging.basicConfig(
+        level=logging.INFO,
+        format=FORMAT,
+        handlers=[logging.FileHandler("debug.log"), logging.StreamHandler()],
+    )
 
     argParser = argparse.ArgumentParser()
     argParser.add_argument(
