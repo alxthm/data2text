@@ -216,5 +216,9 @@ class Seq2seqTrainer:
                     step=global_step,
                 )
 
-            # evaluate after each epoch
-            self.evaluator.evaluate_dev(epoch)
+            # evaluate after each epoch (and save model checkpoint if necessary)
+            self.evaluator.on_epoch_end(epoch)
+
+        # evaluate on test set
+        #   todo: remove when tuning hyperparameters, to make sure we don't overfit on test set
+        self.evaluator.on_training_end()

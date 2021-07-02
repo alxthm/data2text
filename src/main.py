@@ -17,7 +17,8 @@ from src.utils import (
     WarningsFilter,
     seed_everything,
     mlflow_log_src_and_config,
-    ModelSummary, Mode,
+    ModelSummary,
+    Mode,
 )
 
 logging.basicConfig(
@@ -73,6 +74,7 @@ def main(timestamp: str):
         logging.info(f"\n{summary}")
 
         evaluator = EvaluatorWebNLG(
+            run_name=run_name,
             mode=Mode(conf.mode),
             datasets=datasets,
             tokenizer=tokenizer,
@@ -81,6 +83,7 @@ def main(timestamp: str):
             num_beams_t2g=conf.num_beams_t2g,
             num_beams_g2t=conf.num_beams_g2t,
             log_path=project_dir / f"models/{run_name}",
+            checkpoints=conf.checkpoints,
             tensorboard_writer=tb_writer,
             limit_samples=10 if conf.fast_dev_run else False,
         )
@@ -99,15 +102,6 @@ def main(timestamp: str):
             max_training_steps=10 if conf.fast_dev_run else -1,
         )
         trainer.train()
-
-        # evaluate on test set
-        #   todo: remove when tuning hyperparameters, to make sure we don't overfit on test set
-        evaluator.evaluate_test()
-
-        # save model checkpoint
-        if conf.checkpoint:
-            torch.save(model.state_dict(), f"/tmp/{run_name}_model.pt")
-            mlflow.log_artifact(f"/tmp/{run_name}_model.pt", f"model.pt")
 
 
 if __name__ == "__main__":

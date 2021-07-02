@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Union, Set, Tuple, Dict
 
 import mlflow
+import torch
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -22,6 +23,7 @@ from src.utils import MyLogger, Mode
 class EvaluatorWebNLG:
     def __init__(
         self,
+        run_name: str,
         mode: Mode,
         datasets: Dict[str, Seq2seqDataset],
         tokenizer: PreTrainedTokenizer,
@@ -30,9 +32,11 @@ class EvaluatorWebNLG:
         num_beams_t2g: int,
         num_beams_g2t: int,
         log_path: Path,
+        checkpoints: str,
         tensorboard_writer: SummaryWriter = None,
         limit_samples: Union[int, bool] = False,
     ):
+        self.run_name = run_name
         self.mode = mode
         self.datasets = datasets
         self.tokenizer = tokenizer
@@ -49,15 +53,22 @@ class EvaluatorWebNLG:
         )
         self.log_path = log_path
         self.limit_samples = limit_samples  # do not use all entire validation dataset
+        self.checkpoints = checkpoints
 
-    def evaluate_dev(self, epoch: int):
+    def on_epoch_end(self, epoch: int):
         self.evaluate_and_log(epoch, split="dev")
+        if self.checkpoints == "on_epoch_end":
+            torch.save(self.model.state_dict(), f"/tmp/{self.run_name}_model.pt")
+            mlflow.log_artifact(f"/tmp/{self.run_name}_model.pt", f"model_ep{epoch}.pt")
 
-    def evaluate_test(self):
+    def on_training_end(self):
         self.evaluate_and_log(-1, split="test_all")
         self.evaluate_and_log(-1, split="test_seen")
         self.evaluate_and_log(-1, split="test_unseen_ent")
         self.evaluate_and_log(-1, split="test_unseen_cat")
+        if self.checkpoints == "on_training_end":
+            torch.save(self.model.state_dict(), f"/tmp/{self.run_name}_model.pt")
+            mlflow.log_artifact(f"/tmp/{self.run_name}_model.pt", f"model_final.pt")
 
     def evaluate_and_log(self, epoch, split: str):
         """
