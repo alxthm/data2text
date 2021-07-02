@@ -1,5 +1,5 @@
 seed: 0
-mode: "g2t"
+mode: "both_unsup"
 fast_dev_run: False
 
 # training
@@ -15,3 +15,4 @@ batch_size_val: 8
 
 # logging
 checkpoint: False
+log_every_n_steps: 100  # for training metrics (evaluation is always done after each epoch)

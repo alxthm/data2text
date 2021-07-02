@@ -13,10 +13,10 @@ from transformers import (
 )
 
 from src.data.datasets import Seq2seqDataset, WebNLG2020
-from src.data.formatting import Example, Mode
+from src.data.formatting import Example
 from src.eval.webnlg_g2t.eval import run as run_webnlg_g2t_eval
 from src.eval.utils import get_precision_recall_f1
-from src.utils import MyLogger
+from src.utils import MyLogger, Mode
 
 
 class EvaluatorWebNLG:

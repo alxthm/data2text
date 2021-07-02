@@ -3,11 +3,6 @@ from typing import List, Tuple
 
 from dataclasses import dataclass
 
-class Mode(Enum):
-    t2g = "t2g"
-    g2t = "g2t"
-    # both_sup and both_unsup to add
-
 
 @dataclass
 class Entity:

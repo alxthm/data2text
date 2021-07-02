@@ -10,14 +10,14 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, T5ForConditionalGeneration
 
 from src.data.datasets import WebNLG2020
-from src.data.formatting import GraphFormat, Mode
+from src.data.formatting import GraphFormat
 from src.eval.evaluator import EvaluatorWebNLG
 from src.trainer import Seq2seqTrainer
 from src.utils import (
     WarningsFilter,
     seed_everything,
     mlflow_log_src_and_config,
-    ModelSummary,
+    ModelSummary, Mode,
 )
 
 logging.basicConfig(
@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 
 
-def train(timestamp: str):
+def main(timestamp: str):
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
@@ -95,6 +95,7 @@ def train(timestamp: str):
             batch_size=conf.batch_size_train,
             num_epochs=conf.epochs,
             tensorboard_writer=tb_writer,
+            log_every_n_steps=conf.log_every_n_steps,
             max_training_steps=10 if conf.fast_dev_run else -1,
         )
         trainer.train()
@@ -106,13 +107,11 @@ def train(timestamp: str):
         # save model checkpoint
         if conf.checkpoint:
             torch.save(model.state_dict(), f"/tmp/{run_name}_model.pt")
-            mlflow.log_artifact(
-                f"/tmp/{run_name}_model.pt", f"model.pt"
-            )
+            mlflow.log_artifact(f"/tmp/{run_name}_model.pt", f"model.pt")
 
 
 if __name__ == "__main__":
     # filter out some hdfs warnings (from 3rd party python libraries)
     sys.stdout = WarningsFilter(sys.stdout)
     sys.stderr = WarningsFilter(sys.stderr)
-    train(timestamp=datetime.datetime.today().strftime("%m%d%H%M%S"))
+    main(timestamp=datetime.datetime.today().strftime("%m%d%H%M%S"))

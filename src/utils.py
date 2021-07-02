@@ -1,4 +1,5 @@
 from collections import OrderedDict, Counter
+from enum import Enum
 from pathlib import Path
 from typing import Union, List, Tuple, Dict
 
@@ -9,6 +10,13 @@ import random
 import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
+
+
+class Mode(Enum):
+    t2g = "t2g"
+    g2t = "g2t"
+    both_sup = "both_sup"
+    both_unsup = "both_unsup"
 
 
 class WarningsFilter:
