@@ -61,6 +61,7 @@ from tabulate import tabulate
 
 from src.eval.webnlg_g2t.metrics.chrF import computeChrF
 
+nltk.download("punkt")
 metrics_dir = Path(__file__).resolve().parent
 BLEU_PATH = str(metrics_dir / "metrics/multi-bleu-detok.perl")
 METEOR_PATH = str(metrics_dir / "metrics/meteor-1.5/meteor-1.5.jar")
@@ -133,16 +134,21 @@ def bleu_score(refs_path, hyps_path, num_refs):
 
 
 def bleu_nltk(references, hypothesis):
-    # check for empty lists
-    references_, hypothesis_ = [], []
-    for i, refs in enumerate(references):
-        refs_ = [ref for ref in refs if ref.strip() != ""]
-        if len(refs_) > 0:
-            references_.append([ref.split() for ref in refs_])
-            hypothesis_.append(hypothesis[i].split())
+    try:
+        # check for empty lists
+        references_, hypothesis_ = [], []
+        for i, refs in enumerate(references):
+            refs_ = [ref for ref in refs if ref.strip() != ""]
+            if len(refs_) > 0:
+                references_.append([ref.split() for ref in refs_])
+                hypothesis_.append(hypothesis[i].split())
 
-    chencherry = SmoothingFunction()
-    return corpus_bleu(references_, hypothesis_, smoothing_function=chencherry.method3)
+        chencherry = SmoothingFunction()
+        return corpus_bleu(
+            references_, hypothesis_, smoothing_function=chencherry.method3
+        )
+    except:
+        return -1
 
 
 def meteor_score(references, hypothesis, num_refs, lng="en"):

@@ -82,33 +82,36 @@ class EvaluatorWebNLG:
         self.model.eval()  # .no_grad() already called by model.generate(), but not .eval()
         self.model.to(self.device)
 
-        # run the evaluation loop and get resulting metrics
+        # run the evaluation loop: do inference and compute metrics
         logging.info(f"[ep{epoch}] evaluating on {split}...")
-        res, logs = self.run_evaluation(split, epoch)
-
-        # print and save eval metrics
-        logging.info(f"[ep{epoch}] eval results: {res}")
-        self.logger.log_metrics(metrics=res, step=epoch)
-
-        # save predictions logs to mlflow
-        mode = self.mode.value  # t2g, g2t, ...
-        file_path = self.log_path / f"{mode}_{split}_{epoch}.txt"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(logs)
-        mlflow.log_artifact(str(file_path), f"{mode}_out/{epoch}")
-
-    def run_evaluation(self, split: str, epoch: int):
-        """
-        Evaluate model on this dataset. Do inference, compute and return metrics
-        """
         dataset = self.datasets[split]
-
+        logs_t2g, logs_g2t = "", ""
         if self.mode == Mode.t2g:
-            return self.run_evaluation_t2g(dataset, split)
+            metrics, logs_t2g = self.run_evaluation_t2g(dataset, split)
         elif self.mode == Mode.g2t:
-            return self.run_evaluation_g2t(dataset, split, epoch=epoch)
+            metrics, logs_g2t = self.run_evaluation_g2t(dataset, split, epoch=epoch)
+        elif self.mode == Mode.both_sup or self.mode == Mode.both_unsup:
+            metrics_t2g, logs_t2g = self.run_evaluation_t2g(dataset, split)
+            metrics_g2t, logs_g2t = self.run_evaluation_g2t(dataset, split, epoch=epoch)
+            metrics = {**metrics_t2g, **metrics_g2t}
+            # make sure we don't override some metrics
+            if len(metrics_t2g.keys() & metrics_g2t.keys()) > 0:
+                duplicated_keys = metrics_t2g.keys() & metrics_g2t.keys()
+                logging.warning(f"Duplicated keys in eval metrics: {duplicated_keys}")
         else:
             raise ValueError
+
+        # print and save eval metrics
+        logging.info(f"[ep{epoch}] eval results: {metrics}")
+        self.logger.log_metrics(metrics=metrics, step=epoch)
+
+        # save predictions logs to mlflow
+        for mode, logs in {"t2g": logs_t2g, "g2t": logs_g2t}.items():
+            if len(logs) > 0:
+                file_path = self.log_path / f"{mode}_{split}_{epoch}.txt"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(logs)
+                mlflow.log_artifact(str(file_path), f"{mode}_out/{epoch}")
 
     def run_evaluation_g2t(self, dataset, split: str, epoch: int):
         dataloader = DataLoader(

@@ -99,7 +99,7 @@ def main(timestamp: str):
             num_epochs=conf.epochs,
             tensorboard_writer=tb_writer,
             log_every_n_steps=conf.log_every_n_steps,
-            max_training_steps=10 if conf.fast_dev_run else -1,
+            max_training_steps=2 if conf.fast_dev_run else -1,
         )
         trainer.train()
 

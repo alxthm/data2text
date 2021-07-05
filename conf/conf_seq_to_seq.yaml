@@ -1,5 +1,5 @@
 seed: 0
-mode: "both_unsup"
+mode: "both_sup"
 fast_dev_run: False
 
 # training

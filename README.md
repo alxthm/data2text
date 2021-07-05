@@ -39,11 +39,6 @@ mv meteor-1.5 metrics
 rm meteor-1.5.tar.gz
 ```
 
-Also (not mentioned on their readme, but necessary)
-```
-python -c 'import nltk; nltk.download("punkt")'
-```
-
 And for METEOR, make sure that Java JRE is installed on your machine
 
 ```
