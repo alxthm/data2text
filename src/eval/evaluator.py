@@ -5,12 +5,14 @@ from typing import Union, Set, Tuple, Dict
 
 import mlflow
 import torch
+from accelerate import Accelerator
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import (
     default_data_collator,
     PreTrainedTokenizer,
+    PreTrainedModel, T5ForConditionalGeneration,
 )
 
 from src.data.datasets import Seq2seqDataset, WebNLG2020
@@ -27,7 +29,8 @@ class EvaluatorWebNLG:
         mode: Mode,
         datasets: Dict[str, Seq2seqDataset],
         tokenizer: PreTrainedTokenizer,
-        model,
+        accelerator: Accelerator,
+        ddp_model,
         batch_size: int,
         num_beams_t2g: int,
         num_beams_g2t: int,
@@ -40,8 +43,8 @@ class EvaluatorWebNLG:
         self.mode = mode
         self.datasets = datasets
         self.tokenizer = tokenizer
-        self.model = model
-        self.device = model.device
+        self.accelerator = accelerator
+        self.ddp_model = ddp_model
 
         self.batch_size = batch_size
         self.num_beams_t2g = num_beams_t2g
@@ -49,7 +52,9 @@ class EvaluatorWebNLG:
         self.max_output_length = datasets["dev"].max_seq_length
 
         self.logger = MyLogger(
-            tensorboard_writer=tensorboard_writer, log_every_n_steps=1
+            tensorboard_writer=tensorboard_writer,
+            log_every_n_steps=1,
+            accelerator=accelerator,
         )
         self.log_path = log_path
         self.limit_samples = limit_samples  # do not use all entire validation dataset
@@ -57,18 +62,26 @@ class EvaluatorWebNLG:
 
     def on_epoch_end(self, epoch: int):
         self.evaluate_and_log(epoch, split="dev")
+
         if self.checkpoints == "on_epoch_end":
-            torch.save(self.model.state_dict(), f"/tmp/{self.run_name}_model.pt")
-            mlflow.log_artifact(f"/tmp/{self.run_name}_model.pt", f"model_ep{epoch}.pt")
+            self.accelerator.wait_for_everyone()
+            unwrapped_model = self.accelerator.unwrap_model(self.ddp_model)
+            filename = f"/tmp/{self.run_name}_model.pt"
+            self.accelerator.save(unwrapped_model.state_dict(), filename)
+            mlflow.log_artifact(filename, f"model_ep{epoch}.pt")
 
     def on_training_end(self):
         self.evaluate_and_log(-1, split="test_all")
         self.evaluate_and_log(-1, split="test_seen")
         self.evaluate_and_log(-1, split="test_unseen_ent")
         self.evaluate_and_log(-1, split="test_unseen_cat")
+
         if self.checkpoints == "on_training_end":
-            torch.save(self.model.state_dict(), f"/tmp/{self.run_name}_model.pt")
-            mlflow.log_artifact(f"/tmp/{self.run_name}_model.pt", f"model_final.pt")
+            self.accelerator.wait_for_everyone()
+            unwrapped_model = self.accelerator.unwrap_model(self.ddp_model)
+            filename = f"/tmp/{self.run_name}_model.pt"
+            self.accelerator.save(unwrapped_model.state_dict(), filename)
+            mlflow.log_artifact(filename, f"model_final.pt")
 
     def evaluate_and_log(self, epoch, split: str):
         """
@@ -79,8 +92,7 @@ class EvaluatorWebNLG:
         epoch = int(epoch)
 
         # get model ready for inference
-        self.model.eval()  # .no_grad() already called by model.generate(), but not .eval()
-        self.model.to(self.device)
+        self.ddp_model.eval()  # .no_grad() already called by model.generate(), but not .eval()
 
         # run the evaluation loop: do inference and compute metrics
         logging.info(f"[ep{epoch}] evaluating on {split}...")
@@ -120,9 +132,14 @@ class EvaluatorWebNLG:
             shuffle=False,
             collate_fn=default_data_collator,
         )
+        dataloader = self.accelerator.prepare(dataloader)
         text_predictions = []
         logs = ""
-        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
+        for i, batch in tqdm(
+            enumerate(dataloader),
+            total=len(dataloader),
+            disable=not self.accelerator.is_local_main_process,
+        ):
             if self.limit_samples and (i + 1) * self.batch_size > self.limit_samples:
                 # to speed up validation, do not consider all samples
                 break
@@ -153,11 +170,13 @@ class EvaluatorWebNLG:
 
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
         # get raw batch predictions
-        text_predictions_ids = self.model.generate(
-            batch["graph_ids"].to(self.device),
+        text_predictions_ids = self.ddp_model.module.generate(
+            batch["graph_ids"],
             max_length=self.max_output_length,
             num_beams=self.num_beams_g2t,
         )
+        # gather predictions from all devices
+        text_predictions_ids = self.accelerator.gather(text_predictions_ids)
         # transform predictions and references to plain text (detokenized)
         text_predictions = self.tokenizer.batch_decode(
             text_predictions_ids, skip_special_tokens=True
@@ -190,10 +209,15 @@ class EvaluatorWebNLG:
             shuffle=False,  # if using shuffle and dataset.get_example(id), make sure that id is correct
             collate_fn=default_data_collator,
         )
+        dataloader = self.accelerator.prepare(dataloader)
 
         t2g_results = Counter()
         logs = ""
-        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
+        for i, batch in tqdm(
+            enumerate(dataloader),
+            total=len(dataloader),
+            disable=not self.accelerator.is_local_main_process,
+        ):
             if self.limit_samples and (i + 1) * self.batch_size > self.limit_samples:
                 # to speed up validation, do not consider all samples
                 break
@@ -210,17 +234,17 @@ class EvaluatorWebNLG:
         logs = ""
 
         # get raw batch predictions
-        graph_predictions = self.model.generate(
-            batch["text_ids"].to(self.device),
+        graph_predictions = self.ddp_model.module.generate(
+            batch["text_ids"],
             max_length=self.max_output_length,
             num_beams=self.num_beams_t2g,
         )
 
         for example_id, text_ids, graph_ids, graph_prediction in zip(
-            batch["example_id"],
-            batch["text_ids"],
-            batch["graph_ids"],
-            graph_predictions,
+            self.accelerator.gather(batch["example_id"]),
+            self.accelerator.gather(batch["text_ids"]),
+            self.accelerator.gather(batch["graph_ids"]),
+            self.accelerator.gather(graph_predictions),
         ):
             # decode the token ids (of prediction, label and input)
             example = dataset.get_example(example_id)
@@ -351,7 +375,7 @@ class EvaluatorWebNLG:
     # ):
     #     # get raw batch predictions
     #     text_predictions_ids = self.model.generate(
-    #         batch["graph_ids"].to(self.device),
+    #         batch["graph_ids"],
     #         max_length=self.max_output_length,
     #         num_beams=self.num_beams_g2t,
     #     )

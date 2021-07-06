@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 import mlflow
-import torch
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, T5ForConditionalGeneration
@@ -22,7 +21,9 @@ from src.utils import (
 )
 
 logging.basicConfig(
-    format="%(asctime)s %(message)s", datefmt="[%H:%M:%S]", level=logging.INFO
+    format="%(processName)-10s %(asctime)s %(message)s",
+    datefmt="[%H:%M:%S]",
+    level=logging.INFO,
 )
 
 
@@ -66,19 +67,31 @@ def main(timestamp: str):
 
         # prepare model
         model = T5ForConditionalGeneration.from_pretrained(conf.model)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model.to(device)
         # extend embedding matrices to include our separator tokens
         model.resize_token_embeddings(len(tokenizer))
         summary = ModelSummary(model, mode="top")
         logging.info(f"\n{summary}")
+
+        trainer = Seq2seqTrainer(
+            model=model,
+            mode=Mode(conf.mode),
+            train_dataset=train_dataset,
+            learning_rate=conf.lr,
+            batch_size=conf.batch_size_train,
+            num_epochs=conf.epochs,
+            tensorboard_writer=tb_writer,
+            log_every_n_steps=conf.log_every_n_steps,
+            max_grad_norm=conf.max_grad_norm,
+            max_training_steps=2 if conf.fast_dev_run else -1,
+        )
 
         evaluator = EvaluatorWebNLG(
             run_name=run_name,
             mode=Mode(conf.mode),
             datasets=datasets,
             tokenizer=tokenizer,
-            model=model,
+            accelerator=trainer.accelerator,
+            ddp_model=trainer.ddp_model,
             batch_size=conf.batch_size_val,
             num_beams_t2g=conf.num_beams_t2g,
             num_beams_g2t=conf.num_beams_g2t,
@@ -87,20 +100,9 @@ def main(timestamp: str):
             tensorboard_writer=tb_writer,
             limit_samples=10 if conf.fast_dev_run else False,
         )
+        trainer.set_evaluator(evaluator)
 
         # train model
-        trainer = Seq2seqTrainer(
-            model=model,
-            mode=Mode(conf.mode),
-            train_dataset=train_dataset,
-            evaluator=evaluator,
-            learning_rate=conf.lr,
-            batch_size=conf.batch_size_train,
-            num_epochs=conf.epochs,
-            tensorboard_writer=tb_writer,
-            log_every_n_steps=conf.log_every_n_steps,
-            max_training_steps=2 if conf.fast_dev_run else -1,
-        )
         trainer.train()
 
 

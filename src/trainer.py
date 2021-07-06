@@ -9,6 +9,7 @@ from transformers import (
     get_scheduler,
     default_data_collator,
 )
+from accelerate import Accelerator
 
 from src.data.datasets import Seq2seqDataset
 from src.eval.evaluator import EvaluatorWebNLG
@@ -16,30 +17,36 @@ from src.utils import MyLogger, Mode
 
 
 class Seq2seqTrainer:
+    # to be set after trainer init (we need to create Trainer with accelerator first)
+    evaluator: EvaluatorWebNLG
+
     def __init__(
         self,
         model,
         mode: Mode,
         train_dataset: Seq2seqDataset,
-        evaluator: EvaluatorWebNLG,
         learning_rate: float,
         batch_size: int,
         num_epochs: int,
         tensorboard_writer: SummaryWriter,
         log_every_n_steps: int,
+        max_grad_norm: float,
         max_training_steps: int = -1,
     ):
-        self.model = model
         self.mode = mode
-        self.device = model.device
 
         # training
-        self.optimizer = AdamW(model.parameters(), lr=learning_rate)
-        self.train_dataloader = DataLoader(
+        optimizer = AdamW(model.parameters(), lr=learning_rate)
+        train_dataloader = DataLoader(
             train_dataset,
             shuffle=True,
             batch_size=batch_size,
             collate_fn=default_data_collator,
+        )
+        # prepare model and data for multi gpu training (if necessary)
+        self.accelerator = Accelerator()
+        self.ddp_model, self.optimizer, self.train_dataloader = self.accelerator.prepare(
+            model, optimizer, train_dataloader
         )
         if max_training_steps > 0:
             self.num_training_steps = max_training_steps
@@ -55,14 +62,17 @@ class Seq2seqTrainer:
         )
         self.batch_size = batch_size
         self.max_output_length = train_dataset.max_seq_length
-
-        # eval
-        self.evaluator = evaluator
+        self.max_grad_norm = max_grad_norm
 
         # logging
         self.logger = MyLogger(
-            tensorboard_writer=tensorboard_writer, log_every_n_steps=log_every_n_steps
+            tensorboard_writer=tensorboard_writer,
+            log_every_n_steps=log_every_n_steps,
+            accelerator=self.accelerator,
         )
+
+    def set_evaluator(self, evaluator: EvaluatorWebNLG):
+        self.evaluator = evaluator
 
     def teach_t2g_one_step(self, text_ids, att_mask_text, graph_ids):
         """
@@ -76,14 +86,14 @@ class Seq2seqTrainer:
             loss_t2g
 
         """
-        self.model.train()
-        t2g_outputs = self.model(
+        self.ddp_model.train()
+        t2g_outputs = self.ddp_model(
             input_ids=text_ids,
             attention_mask=att_mask_text,
             labels=graph_ids,
         )
         loss_t2g = t2g_outputs.loss
-        loss_t2g.backward()
+        self.accelerator.backward(loss_t2g)
         return loss_t2g
 
     def teach_g2t_one_step(self, graph_ids, att_mask_graph, text_ids):
@@ -98,20 +108,20 @@ class Seq2seqTrainer:
             loss_g2t
 
         """
-        self.model.train()
-        g2t_outputs = self.model(
+        self.ddp_model.train()
+        g2t_outputs = self.ddp_model(
             input_ids=graph_ids,
             attention_mask=att_mask_graph,
             labels=text_ids,
         )
         loss_g2t = g2t_outputs.loss
-        loss_g2t.backward()
+        self.accelerator.backward(loss_g2t)
         return loss_g2t
 
     def predict_graph(self, text_ids):
-        self.model.eval()
+        self.ddp_model.eval()
         with torch.no_grad():
-            graph_pred_ids = self.model.generate(
+            graph_pred_ids = self.ddp_model.module.generate(
                 text_ids,
                 max_length=self.max_output_length,
                 num_beams=1,
@@ -121,9 +131,9 @@ class Seq2seqTrainer:
         return graph_pred_ids, graph_pred_att_mask
 
     def predict_text(self, graph_ids):
-        self.model.eval()
+        self.ddp_model.eval()
         with torch.no_grad():
-            text_pred_ids = self.model.generate(
+            text_pred_ids = self.ddp_model.module.generate(
                 graph_ids,
                 max_length=self.max_output_length,
                 num_beams=1,
@@ -138,16 +148,20 @@ class Seq2seqTrainer:
         logging.info(f"     num_epochs: {self.num_epochs}")
 
         for epoch in range(self.num_epochs):
-            for batch in tqdm(self.train_dataloader, desc=f"[ep{epoch}]"):
+            for batch in tqdm(
+                self.train_dataloader,
+                desc=f"[ep{epoch}]",
+                disable=not self.accelerator.is_local_main_process,
+            ):
                 # stop training if a max number of steps was specified
                 if global_step > self.num_training_steps:
                     break
 
                 # move data to device
-                text_ids = batch["text_ids"].to(self.device)
-                att_mask_text = batch["att_mask_text"].to(self.device)
-                graph_ids = batch["graph_ids"].to(self.device)
-                att_mask_graph = batch["att_mask_graph"].to(self.device)
+                text_ids = batch["text_ids"]
+                att_mask_text = batch["att_mask_text"]
+                graph_ids = batch["graph_ids"]
+                att_mask_graph = batch["att_mask_graph"]
 
                 # training step
                 if self.mode == Mode.t2g:
@@ -200,6 +214,9 @@ class Seq2seqTrainer:
                 else:
                     raise ValueError
 
+                self.accelerator.clip_grad_norm_(
+                    self.ddp_model.parameters(), self.max_grad_norm
+                )
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()

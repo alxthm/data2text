@@ -1,3 +1,4 @@
+import logging
 from collections import OrderedDict, Counter
 from enum import Enum
 from pathlib import Path
@@ -7,7 +8,9 @@ import mlflow
 import numpy as np
 import random
 
+import requests
 import torch
+from accelerate import Accelerator
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
@@ -56,10 +59,14 @@ class MyLogger:
     """
 
     def __init__(
-        self, tensorboard_writer: SummaryWriter = None, log_every_n_steps: int = 500
+        self,
+        tensorboard_writer: SummaryWriter,
+        log_every_n_steps: int,
+        accelerator: Accelerator,
     ):
-        self.log_every_n = log_every_n_steps
         self.tb_writer = tensorboard_writer
+        self.log_every_n = log_every_n_steps
+        self.accelerator = accelerator
 
         self.steps_since_last_log = 0
         self.metrics = Counter()
@@ -77,10 +84,14 @@ class MyLogger:
             self.steps_since_last_log = 0
 
             # actually log the metrics
-            mlflow.log_metrics(avg_metrics, step=step)
-            if self.tb_writer:
-                for k, v in avg_metrics.items():
-                    self.tb_writer.add_scalar(k, v, global_step=step)
+            if self.accelerator.is_main_process:
+                try:
+                    mlflow.log_metrics(avg_metrics, step=step)
+                except requests.exceptions.ConnectionError as e:
+                    logging.warning(f"mlflow connection error: {e}")
+                if self.tb_writer:
+                    for k, v in avg_metrics.items():
+                        self.tb_writer.add_scalar(k, v, global_step=step)
 
 
 def update_artifacts_path():
