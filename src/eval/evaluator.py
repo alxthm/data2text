@@ -12,7 +12,8 @@ from tqdm import tqdm
 from transformers import (
     default_data_collator,
     PreTrainedTokenizer,
-    PreTrainedModel, T5ForConditionalGeneration,
+    PreTrainedModel,
+    T5ForConditionalGeneration,
 )
 
 from src.data.datasets import Seq2seqDataset, WebNLG2020
@@ -64,11 +65,9 @@ class EvaluatorWebNLG:
         self.evaluate_and_log(epoch, split="dev")
 
         if self.checkpoints == "on_epoch_end":
-            self.accelerator.wait_for_everyone()
-            unwrapped_model = self.accelerator.unwrap_model(self.ddp_model)
-            filename = f"/tmp/{self.run_name}_model.pt"
-            self.accelerator.save(unwrapped_model.state_dict(), filename)
-            mlflow.log_artifact(filename, f"model_ep{epoch}.pt")
+            self.logger.save_model(
+                ddp_model=self.ddp_model, run_name=self.run_name, tag=f"ep{epoch}"
+            )
 
     def on_training_end(self):
         self.evaluate_and_log(-1, split="test_all")
@@ -77,11 +76,9 @@ class EvaluatorWebNLG:
         self.evaluate_and_log(-1, split="test_unseen_cat")
 
         if self.checkpoints == "on_training_end":
-            self.accelerator.wait_for_everyone()
-            unwrapped_model = self.accelerator.unwrap_model(self.ddp_model)
-            filename = f"/tmp/{self.run_name}_model.pt"
-            self.accelerator.save(unwrapped_model.state_dict(), filename)
-            mlflow.log_artifact(filename, f"model_final.pt")
+            self.logger.save_model(
+                ddp_model=self.ddp_model, run_name=self.run_name, tag="final"
+            )
 
     def evaluate_and_log(self, epoch, split: str):
         """
@@ -119,11 +116,10 @@ class EvaluatorWebNLG:
 
         # save predictions logs to mlflow
         for mode, logs in {"t2g": logs_t2g, "g2t": logs_g2t}.items():
-            if len(logs) > 0:
-                file_path = self.log_path / f"{mode}_{split}_{epoch}.txt"
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(logs)
-                mlflow.log_artifact(str(file_path), f"{mode}_out/{epoch}")
+            logs_path = self.log_path / f"{mode}_out/{mode}_{split}_{epoch}.txt"
+            self.logger.log_text(
+                text=logs, file_path=logs_path, folder_name=f"{mode}_out"
+            )
 
     def run_evaluation_g2t(self, dataset, split: str, epoch: int):
         dataloader = DataLoader(
@@ -148,10 +144,12 @@ class EvaluatorWebNLG:
             logs += batch_logs
 
         # save predictions to a txt file
-        hyps_path = self.log_path / f"text_pred_{self.mode.value}_{split}_{epoch}.txt"
-        with open(hyps_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(text_predictions))
-        mlflow.log_artifact(str(hyps_path), f"g2t_pred/{split}_{epoch}")
+        hyps_path = self.log_path / f"g2t_eval/{split}_{epoch}.txt"
+        self.logger.log_text(
+            text="\n".join(text_predictions),
+            file_path=hyps_path,
+            folder_name="g2t_eval",
+        )
 
         data_dir = self.log_path / "../../data"
         refs_path = data_dir / f"processed/{dataset.dataset_name}/ref/{split}_<id>.txt"
@@ -175,6 +173,10 @@ class EvaluatorWebNLG:
             max_length=self.max_output_length,
             num_beams=self.num_beams_g2t,
         )
+        # make sure seq_len is the same for each process, before gathering
+        text_predictions_ids = self.accelerator.pad_across_processes(
+            text_predictions_ids, dim=1, pad_index=self.tokenizer.pad_token_id
+        )
         # gather predictions from all devices
         text_predictions_ids = self.accelerator.gather(text_predictions_ids)
         # transform predictions and references to plain text (detokenized)
@@ -182,14 +184,14 @@ class EvaluatorWebNLG:
             text_predictions_ids, skip_special_tokens=True
         )
         references = self.tokenizer.batch_decode(
-            batch["text_ids"], skip_special_tokens=True
+            self.accelerator.gather(batch["text_ids"]), skip_special_tokens=True
         )
 
         # log predictions and reference texts
         logs = ""
         assert len(text_predictions) == len(references)
         for example_id, text, ref in zip(
-            batch["example_id"], text_predictions, references
+            self.accelerator.gather(batch["example_id"]), text_predictions, references
         ):
             example = dataset.get_example(example_id)
             logs += (
@@ -234,28 +236,33 @@ class EvaluatorWebNLG:
         logs = ""
 
         # get raw batch predictions
-        graph_predictions = self.ddp_model.module.generate(
+        # shape: (N, max_seq_len), with max_seq_len depending on the batch (dynamically padded)
+        graph_prediction_ids = self.accelerator.unwrap_model(self.ddp_model).generate(
             batch["text_ids"],
             max_length=self.max_output_length,
             num_beams=self.num_beams_t2g,
         )
+        # make sure seq_len is the same for each process, before gathering
+        graph_prediction_ids = self.accelerator.pad_across_processes(
+            graph_prediction_ids, dim=1, pad_index=self.tokenizer.pad_token_id
+        )
 
-        for example_id, text_ids, graph_ids, graph_prediction in zip(
+        for example_id, text_ids, graph_label_ids, graph_pred_ids in zip(
             self.accelerator.gather(batch["example_id"]),
             self.accelerator.gather(batch["text_ids"]),
             self.accelerator.gather(batch["graph_ids"]),
-            self.accelerator.gather(graph_predictions),
+            self.accelerator.gather(graph_prediction_ids),
         ):
             # decode the token ids (of prediction, label and input)
             example = dataset.get_example(example_id)
             graph_out_sentence = self.tokenizer.decode(
-                graph_prediction,
+                graph_pred_ids,
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )
             text_in_sentence = self.tokenizer.decode(text_ids, skip_special_tokens=True)
             graph_label_sentence = self.tokenizer.decode(
-                graph_ids, skip_special_tokens=True
+                graph_label_ids, skip_special_tokens=True
             )
 
             # parse sentence with predicted graph, obtain sets of predicted entities and relations

@@ -25,6 +25,7 @@ class Seq2seqTrainer:
         model,
         mode: Mode,
         train_dataset: Seq2seqDataset,
+        accelerator: Accelerator,
         learning_rate: float,
         batch_size: int,
         num_epochs: int,
@@ -44,10 +45,12 @@ class Seq2seqTrainer:
             collate_fn=default_data_collator,
         )
         # prepare model and data for multi gpu training (if necessary)
-        self.accelerator = Accelerator()
-        self.ddp_model, self.optimizer, self.train_dataloader = self.accelerator.prepare(
-            model, optimizer, train_dataloader
-        )
+        self.accelerator = accelerator
+        (
+            self.ddp_model,
+            self.optimizer,
+            self.train_dataloader,
+        ) = accelerator.prepare(model, optimizer, train_dataloader)
         if max_training_steps > 0:
             self.num_training_steps = max_training_steps
             self.num_epochs = 1
@@ -68,11 +71,38 @@ class Seq2seqTrainer:
         self.logger = MyLogger(
             tensorboard_writer=tensorboard_writer,
             log_every_n_steps=log_every_n_steps,
-            accelerator=self.accelerator,
+            accelerator=accelerator,
         )
 
     def set_evaluator(self, evaluator: EvaluatorWebNLG):
         self.evaluator = evaluator
+
+    def predict_graph(self, text_ids):
+        self.ddp_model.eval()
+        with torch.no_grad():
+            model = self.accelerator.unwrap_model(self.ddp_model)
+            graph_pred_ids = model.generate(
+                text_ids,
+                max_length=self.max_output_length,
+                num_beams=1,
+            )
+            # attention mask: 0 if it's a padding token, 1 otherwise
+            graph_pred_att_mask = (graph_pred_ids != 0).type_as(graph_pred_ids)
+        # multi-GPU: no need to gather predictions across processes, since the
+        # predictions are to be used in training (gathering is down after the loss is computed)
+        return graph_pred_ids, graph_pred_att_mask
+
+    def predict_text(self, graph_ids):
+        self.ddp_model.eval()
+        with torch.no_grad():
+            text_pred_ids = self.ddp_model.module.generate(
+                graph_ids,
+                max_length=self.max_output_length,
+                num_beams=1,
+            )
+            # attention mask: 0 if it's a padding token, 1 otherwise
+            text_pred_att_mask = (text_pred_ids != 0).type_as(text_pred_ids)
+        return text_pred_ids, text_pred_att_mask
 
     def teach_t2g_one_step(self, text_ids, att_mask_text, graph_ids):
         """
@@ -117,30 +147,6 @@ class Seq2seqTrainer:
         loss_g2t = g2t_outputs.loss
         self.accelerator.backward(loss_g2t)
         return loss_g2t
-
-    def predict_graph(self, text_ids):
-        self.ddp_model.eval()
-        with torch.no_grad():
-            graph_pred_ids = self.ddp_model.module.generate(
-                text_ids,
-                max_length=self.max_output_length,
-                num_beams=1,
-            )
-            # attention mask: 0 if it's a padding token, 1 otherwise
-            graph_pred_att_mask = (graph_pred_ids != 0).type_as(graph_pred_ids)
-        return graph_pred_ids, graph_pred_att_mask
-
-    def predict_text(self, graph_ids):
-        self.ddp_model.eval()
-        with torch.no_grad():
-            text_pred_ids = self.ddp_model.module.generate(
-                graph_ids,
-                max_length=self.max_output_length,
-                num_beams=1,
-            )
-            # attention mask: 0 if it's a padding token, 1 otherwise
-            text_pred_att_mask = (text_pred_ids != 0).type_as(text_pred_ids)
-        return text_pred_ids, text_pred_att_mask
 
     def train(self):
         global_step = 0
