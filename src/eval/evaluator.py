@@ -155,15 +155,21 @@ class EvaluatorWebNLG:
         refs_path = data_dir / f"processed/{dataset.dataset_name}/ref/{split}_<id>.txt"
         # todo: this is a hack, make it more robust?
         num_refs = 3 if split == "test_unseen_ent" else 4
-        metrics = run_webnlg_g2t_eval(
-            refs_path=str(refs_path.resolve()),
-            hyps_path=hyps_path,
-            num_refs=num_refs,
-            lng="en",
-            metrics="bleu,meteor,bert",
-            # metrics="bleu,meteor,chrf++,ter,bert,bleurt",  # all official WebNLG2020 metrics
-        )
-        metrics = {f"{split}/{k}": v for k, v in metrics.items()}
+        if self.accelerator.is_main_process:
+            metrics = run_webnlg_g2t_eval(
+                refs_path=str(refs_path.resolve()),
+                hyps_path=hyps_path,
+                num_refs=num_refs,
+                lng="en",
+                metrics="bleu,meteor,bert",
+                # all official WebNLG2020 metrics
+                # metrics="bleu,meteor,chrf++,ter,bert,bleurt",
+            )
+            metrics = {f"{split}/{k}": v for k, v in metrics.items()}
+        else:
+            # multi-GPU: we don't save anything to the drive from other processes,
+            # so we cannot compute metrics from prediction text files
+            metrics = {}
         return metrics, logs
 
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
