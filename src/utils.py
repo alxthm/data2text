@@ -1,3 +1,5 @@
+import logging
+import os
 from collections import OrderedDict, Counter
 from enum import Enum
 from pathlib import Path
@@ -7,7 +9,9 @@ import mlflow
 import numpy as np
 import random
 
+import requests
 import torch
+from accelerate import Accelerator
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
@@ -56,10 +60,14 @@ class MyLogger:
     """
 
     def __init__(
-        self, tensorboard_writer: SummaryWriter = None, log_every_n_steps: int = 500
+        self,
+        tensorboard_writer: SummaryWriter,
+        log_every_n_steps: int,
+        accelerator: Accelerator,
     ):
-        self.log_every_n = log_every_n_steps
         self.tb_writer = tensorboard_writer
+        self.log_every_n = log_every_n_steps
+        self.accelerator = accelerator
 
         self.steps_since_last_log = 0
         self.metrics = Counter()
@@ -77,10 +85,34 @@ class MyLogger:
             self.steps_since_last_log = 0
 
             # actually log the metrics
-            mlflow.log_metrics(avg_metrics, step=step)
-            if self.tb_writer:
-                for k, v in avg_metrics.items():
-                    self.tb_writer.add_scalar(k, v, global_step=step)
+            if self.accelerator.is_main_process:
+                try:
+                    mlflow.log_metrics(avg_metrics, step=step)
+                except requests.exceptions.ConnectionError as e:
+                    logging.warning(f"mlflow connection error: {e}")
+                if self.tb_writer:
+                    for k, v in avg_metrics.items():
+                        self.tb_writer.add_scalar(k, v, global_step=step)
+
+    def log_text(self, text: str, file_path: Path, folder_name: str):
+        if len(text) > 0 and self.accelerator.is_main_process:
+            # save text file to disk
+            os.makedirs(file_path.parent, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            # log it to mlflow
+            mlflow.log_artifact(str(file_path), folder_name)
+
+    def save_model(self, ddp_model, run_name: str, tag: str):
+        self.accelerator.wait_for_everyone()
+        # save model weights to disk
+        unwrapped_model = self.accelerator.unwrap_model(ddp_model)
+        filename = f"/tmp/{run_name}_model.pt"
+        self.accelerator.save(unwrapped_model.state_dict(), filename)
+
+        if self.accelerator.is_main_process:
+            # log to mlflow
+            mlflow.log_artifact(filename, f"model_{tag}.pt")
 
 
 def update_artifacts_path():

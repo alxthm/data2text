@@ -1,6 +1,7 @@
 # includes requirements from https://github.com/WebNLG/GenerationEval/blob/master/requirements.txt
 # (but use bert_score 0.3.7, not 0.3.5, to actually work with more recent versions of transformers)
 absl-py==0.12.0
+accelerate==0.3.0
 aiohttp==3.7.4.post0
 alembic==1.4.1
 argon2-cffi==20.1.0

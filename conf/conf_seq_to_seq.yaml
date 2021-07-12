@@ -7,6 +7,7 @@ model: "t5-base"
 epochs: 5
 lr: 1.0e-4
 batch_size_train: 8
+max_grad_norm: 1.0
 
 # validation
 num_beams_t2g: 8
