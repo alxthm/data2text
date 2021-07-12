@@ -1,6 +1,6 @@
 seed: 0
 mode: "both_sup"
-fast_dev_run: False
+fast_dev_run: True
 
 # training
 model: "t5-base"
@@ -14,5 +14,5 @@ num_beams_g2t: 5
 batch_size_val: 8
 
 # logging
-checkpoints: "on_epoch_end"  # 'no', 'on_training_end', or 'on_epoch_end'
+checkpoints: "no"  # 'no', 'on_training_end', or 'on_epoch_end'
 log_every_n_steps: 100  # for training metrics (evaluation is always done after each epoch)

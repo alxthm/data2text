@@ -2,9 +2,11 @@
 data/raw/genwiki/
 data/processed/
 **/.DS_Store
+src/eval/webnlg_g2t/metrics/meteor-1.5/
 
 # model checkpoints
 models/
+mlruns/
 
 # IDE files
 .idea

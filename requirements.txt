@@ -21,7 +21,7 @@ cloudpickle==1.6.0
 cycler==0.10.0
 Cython==0.29.23
 databricks-cli==0.14.3
-dataclasses==0.8
+dataclasses==0.6
 datasets==1.8.0
 decorator==4.4.2
 defusedxml==0.7.1
@@ -64,7 +64,7 @@ Markdown==3.3.4
 MarkupSafe==1.1.1
 matplotlib==3.3.4
 mistune==0.8.4
-mlflow==42.0+criteo.1620054890
+mlflow==1.18.0
 multidict==5.1.0
 multiprocess==0.70.12.2
 nbclient==0.5.3
@@ -90,7 +90,7 @@ prometheus-flask-exporter==0.18.2
 prompt-toolkit==3.0.18
 protobuf==3.16.0
 ptyprocess==0.7.0
-pyarrow==3.0.0
+#pyarrow==3.0.0
 pyasn1==0.4.8
 pyasn1-modules==0.2.8
 pycocoevalcap==1.2
