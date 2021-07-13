@@ -174,7 +174,10 @@ class EvaluatorWebNLG:
 
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
         # get raw batch predictions
-        text_predictions_ids = self.ddp_model.module.generate(
+        model=self.accelerator.unwrap_model(self.ddp_model)
+
+
+        text_predictions_ids = model.generate(
             batch["graph_ids"],
             max_length=self.max_output_length,
             num_beams=self.num_beams_g2t,
