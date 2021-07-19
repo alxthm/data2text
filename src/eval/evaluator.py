@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from src.data.datasets import Seq2seqDataset, WebNLG2020
-from src.data.formatting import Example
+from src.data.formatting import Example, GraphFormat
 from src.eval.webnlg_g2t.eval import run as run_webnlg_g2t_eval
 from src.eval.utils import get_precision_recall_f1
 from src.utils import MyLogger, Mode
@@ -56,6 +56,7 @@ class EvaluatorWebNLG:
             tensorboard_writer=tensorboard_writer,
             log_every_n_steps=1,
             accelerator=accelerator,
+            use_loggers=tensorboard_writer is not None,
         )
         self.log_path = log_path
         self.limit_samples = limit_samples  # do not use all entire validation dataset
@@ -174,8 +175,7 @@ class EvaluatorWebNLG:
 
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
         # get raw batch predictions
-        model=self.accelerator.unwrap_model(self.ddp_model)
-
+        model = self.accelerator.unwrap_model(self.ddp_model)
 
         text_predictions_ids = model.generate(
             batch["graph_ids"],
@@ -275,9 +275,7 @@ class EvaluatorWebNLG:
             )
 
             # parse sentence with predicted graph, obtain sets of predicted entities and relations
-            parsed_graph_pred = dataset.graph_format.extract_raw_graph(
-                graph_out_sentence
-            )
+            parsed_graph_pred = GraphFormat.extract_raw_graph(graph_out_sentence)
             predicted_entities, predicted_relations, wrong_format = parsed_graph_pred
 
             # compare predictions to ground truth

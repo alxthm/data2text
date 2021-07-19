@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 import torch
+from accelerate import Accelerator
 from datasets import load_dataset
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -32,6 +33,7 @@ class Seq2seqDataset(Dataset, ABC):
         data_dir: Path,
         split: str,
         tokenizer: PreTrainedTokenizer,
+        accelerator: Accelerator = None,
     ):
         """
         Base class for both graph-to-text and text-to-graph tasks, in a seq2seq setting
@@ -44,14 +46,16 @@ class Seq2seqDataset(Dataset, ABC):
         """
         self.data_dir = data_dir
         self.tokenizer = tokenizer
+        is_main_process = accelerator is None or accelerator.is_main_process
 
-        # self.text_format = TextFormat()
-        self.graph_format = GraphFormat()
-
-        if not os.path.isfile(data_dir / f"processed/{self.dataset_name}/train.pth"):
-            # if not already done, preprocess raw data and save it to disk,
-            # for training and evaluation
+        if is_main_process and not os.path.isfile(
+            data_dir / f"processed/{self.dataset_name}/train.pth"
+        ):
+            # if not already done, preprocess raw data and save it to disk, for training and eval
             self.build_dataset()
+        if accelerator:
+            # wait for the main process to build the dataset
+            accelerator.wait_for_everyone()
 
         self.examples, self.features, self.unique_graph_ids = torch.load(
             data_dir / f"processed/{self.dataset_name}/{split}.pth"
@@ -123,9 +127,9 @@ class Seq2seqDataset(Dataset, ABC):
         graph_sentences = []
         for example in tqdm(examples):
             text_sentences.append(example.text)
-            graph_sentences.append(self.graph_format.serialize_graph(example.graph))
+            graph_sentences.append(GraphFormat.serialize_graph(example.graph))
 
-        text_tok = self.tokenizer.batch_encode_plus(
+        text_tok = self.tokenizer(
             text_sentences,
             max_length=self.max_seq_length,
             return_tensors="pt",
@@ -134,7 +138,7 @@ class Seq2seqDataset(Dataset, ABC):
         )
         self._warn_max_sequence_length(self.max_seq_length, text_sentences, "input")
 
-        graph_tok = self.tokenizer.batch_encode_plus(
+        graph_tok = self.tokenizer(
             graph_sentences,
             max_length=self.max_seq_length,
             return_tensors="pt",
