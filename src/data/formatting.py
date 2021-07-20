@@ -1,7 +1,8 @@
-from enum import Enum
 from typing import List, Tuple
 
+import torch
 from dataclasses import dataclass
+from transformers import PreTrainedTokenizer
 
 
 @dataclass
@@ -45,8 +46,10 @@ class GraphFormat:
     HEAD_TOKEN = "[HEAD]"
     TYPE_TOKEN = "[TYPE]"
     TAIL_TOKEN = "[TAIL]"
+    BLANK_TOKEN = "[BLANK]"
 
-    def serialize_graph(self, graph: List[Triple]) -> str:
+    @staticmethod
+    def serialize_graph(graph: List[Triple]) -> str:
         """
         Format graph (list of relations) into a string
 
@@ -57,26 +60,31 @@ class GraphFormat:
         """
         seralized_graphs = []
         for triple in graph:
-            seralized_graphs.append(
-                " ".join(
-                    [
-                        self.HEAD_TOKEN,
-                        triple.head.text,
-                        self.TYPE_TOKEN,
-                        triple.rel.natural,
-                        self.TAIL_TOKEN,
-                        triple.tail.text,
-                    ]
+            if triple == GraphFormat.BLANK_TOKEN:
+                # make it possible to replace entire triplets with a [BLANK] token
+                seralized_graphs.append(triple)
+            else:
+                seralized_graphs.append(
+                    " ".join(
+                        [
+                            GraphFormat.HEAD_TOKEN,
+                            triple.head.text,
+                            GraphFormat.TYPE_TOKEN,
+                            triple.rel.natural,
+                            GraphFormat.TAIL_TOKEN,
+                            triple.tail.text,
+                        ]
+                    )
                 )
-            )
         return " ".join(seralized_graphs)
 
-    def extract_raw_graph(self, output_sentence: str) -> Tuple[set, set, bool]:
+    @staticmethod
+    def extract_raw_graph(output_sentence: str) -> Tuple[set, set, bool]:
         """
         Parse raw output sentence, extract entities and relations
 
         Returns:
-            Raw set of entities (str) and relations (tuple of str), and whether
+            Raw set of entities (str) and triples (tuple of str), and whether
             there was a parsing error at some point
 
         Examples:
@@ -96,20 +104,20 @@ class GraphFormat:
         predicted_relations = set()
 
         # parse_output_sentence
-        for relation in output_sentence.split(self.HEAD_TOKEN):
+        for relation in output_sentence.split(GraphFormat.HEAD_TOKEN):
             if len(relation) == 0:
                 # if '[HEAD]' is at the beginning of the sentence we can obtain an empty str
                 continue
 
             # try splitting head from type and tail
-            split_type = relation.split(self.TYPE_TOKEN)
+            split_type = relation.split(GraphFormat.TYPE_TOKEN)
             if len(split_type) != 2:
                 format_error = True
                 continue
             head, type_and_tail = split_type
 
             # try splitting type and tail
-            split_tail = type_and_tail.split(self.TAIL_TOKEN)
+            split_tail = type_and_tail.split(GraphFormat.TAIL_TOKEN)
             if len(split_tail) != 2:
                 format_error = True
                 continue
@@ -122,3 +130,53 @@ class GraphFormat:
             predicted_relations.add((e1, rel, e2))
 
         return predicted_entities, predicted_relations, format_error
+
+    @staticmethod
+    def split_triples(sequence) -> List[str]:
+        """
+        Split an input sequence into a list of triples (still as strings)
+
+        Examples
+            >>> sequence = "[HEAD] 20 Fenchurch Street [TYPE] location [TAIL] London [HEAD] London [TYPE] leader title [TAIL] European Parliament"
+            >>> GraphFormat.split_triples(sequence)
+            ["[HEAD] 20 Fenchurch Street [TYPE] location [TAIL] London",
+             "[HEAD] London [TYPE] leader title [TAIL] European Parliament"]
+        """
+        triples = sequence.split(GraphFormat.HEAD_TOKEN)
+        # don't consider the empty string at the beginning, given by split()
+        assert len(triples[0]) == 0
+        triples = triples[1:]
+        # add the HEAD token back at the beginning of the triple str
+        triples = [f"{GraphFormat.HEAD_TOKEN} {t.strip()}" for t in triples]
+        return triples
+
+
+def add_prefix(
+    input_ids: torch.Tensor,
+    target: str,
+    tokenizer: PreTrainedTokenizer,
+    max_seq_len: int,
+):
+    # this effectively adds 4 tokens at the beginning of the sequence, but keeps a length
+    # of max_seq_len -> some tokens might be discarded during the process
+    if target == "text":
+        prefix = "Generate text: "
+    elif target == "graph":
+        prefix = "Generate graph: "
+    else:
+        return ValueError
+
+    # decode input id sequence (batch of tokenized inputs), and add prefix
+    input_str = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+    input_str = [prefix + s for s in input_str]
+    # encode back
+    batch_encoding = tokenizer(
+        input_str,
+        max_length=max_seq_len,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+    )
+    batch_encoding = batch_encoding.to(input_ids.device)
+    return batch_encoding.input_ids
+

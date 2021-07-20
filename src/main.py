@@ -34,6 +34,7 @@ def main(timestamp: str):
     # Load config
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+    use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
@@ -41,7 +42,7 @@ def main(timestamp: str):
 
     run_name = f"{timestamp}-{conf.mode}-{conf.model}"
     logging.info(f"run_name: {run_name}\n")
-    if accelerator.is_main_process:
+    if use_loggers:
         tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
     else:
         tb_writer = None
@@ -55,13 +56,16 @@ def main(timestamp: str):
             GraphFormat.HEAD_TOKEN,
             GraphFormat.TYPE_TOKEN,
             GraphFormat.TAIL_TOKEN,
+            GraphFormat.BLANK_TOKEN,
         ]
     )
 
     # load data
     data_dir = project_dir / "data"
     datasets = {
-        split: WebNLG2020(data_dir=data_dir, split=split, tokenizer=tokenizer)
+        split: WebNLG2020(
+            data_dir=data_dir, split=split, tokenizer=tokenizer, accelerator=accelerator
+        )
         for split in WebNLG2020.splits
     }
     train_dataset = datasets["train"]
@@ -76,6 +80,7 @@ def main(timestamp: str):
     trainer = Seq2seqTrainer(
         model=model,
         mode=Mode(conf.mode),
+        tokenizer=tokenizer,
         train_dataset=train_dataset,
         accelerator=accelerator,
         learning_rate=conf.lr,
@@ -104,7 +109,7 @@ def main(timestamp: str):
     )
     trainer.set_evaluator(evaluator)
 
-    if accelerator.is_main_process:
+    if use_loggers:
         mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
         mlflow.set_experiment("al.thomas_d2t_3")
         with mlflow.start_run(run_name=run_name):

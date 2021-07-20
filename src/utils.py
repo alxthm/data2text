@@ -64,10 +64,12 @@ class MyLogger:
         tensorboard_writer: SummaryWriter,
         log_every_n_steps: int,
         accelerator: Accelerator,
+        use_loggers: bool,
     ):
         self.tb_writer = tensorboard_writer
         self.log_every_n = log_every_n_steps
         self.accelerator = accelerator
+        self.use_loggers = use_loggers
 
         self.steps_since_last_log = 0
         self.metrics = Counter()
@@ -85,7 +87,7 @@ class MyLogger:
             self.steps_since_last_log = 0
 
             # actually log the metrics
-            if self.accelerator.is_main_process:
+            if self.use_loggers:
                 try:
                     mlflow.log_metrics(avg_metrics, step=step)
                 except requests.exceptions.ConnectionError as e:
@@ -100,8 +102,10 @@ class MyLogger:
             os.makedirs(file_path.parent, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(text)
-            # log it to mlflow
-            mlflow.log_artifact(str(file_path), folder_name)
+                
+            if self.use_loggers:
+                # log it to mlflow
+                mlflow.log_artifact(str(file_path), folder_name)
 
     def save_model(self, ddp_model, run_name: str, tag: str):
         self.accelerator.wait_for_everyone()
@@ -110,7 +114,7 @@ class MyLogger:
         filename = f"/tmp/{run_name}_model.pt"
         self.accelerator.save(unwrapped_model.state_dict(), filename)
 
-        if self.accelerator.is_main_process:
+        if self.use_loggers:
             # log to mlflow
             mlflow.log_artifact(filename, f"model_{tag}.pt")
 
@@ -119,7 +123,6 @@ def update_artifacts_path():
     # change artifacts locations from hdfs to viewfs, as recommended
     # on mlflow slack channel
     import mlflow
-    import os
 
     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
     experiment_name = "al.thomas_data_2_text"
