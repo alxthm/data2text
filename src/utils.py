@@ -14,6 +14,10 @@ import torch
 from accelerate import Accelerator
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
+# Load config
+from omegaconf import OmegaConf
+project_dir = Path(__file__).resolve().parents[1]
+conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
 
 
 class Mode(Enum):
@@ -124,8 +128,15 @@ def update_artifacts_path():
     # on mlflow slack channel
     import mlflow
 
-    mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
-    experiment_name = "al.thomas_data_2_text"
+    if conf.mlflow.user=='nada':
+        port=conf.mlflow.port
+        mlflow.set_tracking_uri("http://127.0.0.1:{port}/")
+        experiment_name = "Nada_D2T"
+    else:
+        mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
+        experiment_name = "al.thomas_data_2_text"
+
+
     experiment = mlflow.get_experiment_by_name(experiment_name)
     mlflow.set_experiment(experiment_name)
     run_ids = mlflow.search_runs(

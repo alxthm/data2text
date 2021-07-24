@@ -118,15 +118,16 @@ def bleu_score(refs_path, hyps_path, num_refs):
             ref_files.append(refs_path.replace("<id>", str(i)))
 
     command = "perl {0} {1} < {2}".format(BLEU_PATH, " ".join(ref_files), hyps_path)
-    result = subprocess.check_output(command, shell=True)
+    
     try:
+        result = subprocess.check_output(command, shell=True)
         bleu = float(re.findall("BLEU = (.+?),", str(result))[0])
     except:
         logging.error(
-            "ERROR ON COMPUTING METEOR. MAKE SURE YOU HAVE PERL INSTALLED GLOBALLY ON YOUR MACHINE."
+            "ERROR ON COMPUTING BLEU. MAKE SURE YOU HAVE PERL INSTALLED GLOBALLY ON YOUR MACHINE."
         )
         print(
-            "ERROR ON COMPUTING METEOR. MAKE SURE YOU HAVE PERL INSTALLED GLOBALLY ON YOUR MACHINE."
+            "ERROR ON COMPUTING BLEU. MAKE SURE YOU HAVE PERL INSTALLED GLOBALLY ON YOUR MACHINE."
         )
         bleu = -1
     logging.info("FINISHING TO COMPUTE BLEU...")

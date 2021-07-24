@@ -13,6 +13,7 @@ from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat
 from src.eval.evaluator import EvaluatorWebNLG
 from src.trainer import Seq2seqTrainer
+from src.model import T5Custom
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -71,7 +72,7 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model
-    model = T5ForConditionalGeneration.from_pretrained(conf.model)
+    model = T5Custom.from_pretrained(conf.model)
     # extend embedding matrices to include our separator tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")
@@ -110,8 +111,15 @@ def main(timestamp: str):
     trainer.set_evaluator(evaluator)
 
     if use_loggers:
-        mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
-        mlflow.set_experiment("al.thomas_d2t_3")
+
+
+        if conf.user=='nada':
+            mlflow.set_tracking_uri(conf.mlflow.tracking_uri)
+            mlflow.set_experiment(conf.mlflow.experiment_name)
+        else:
+            mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
+            mlflow.set_experiment("al.thomas_d2t_3")
+
         with mlflow.start_run(run_name=run_name):
             mlflow_log_src_and_config(conf, project_dir)
             # train model
