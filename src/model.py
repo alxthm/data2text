@@ -10,6 +10,18 @@ from transformers.utils.model_parallel_utils import assert_device_map, get_devic
 
 
 class T5Custom(T5PreTrainedModel):
+    _keys_to_ignore_on_load_missing = [
+        r"t5\.encoder\.embed_tokens\.weight",
+        r"t5\.decoder\.embed_tokens\.weight",
+        r"t5\.lm_head\.weight",
+    ]
+    _keys_to_ignore_on_load_unexpected = [
+        r"t5\.decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
+    ]
+    # this allows PreTrainedModel._load_state_dict_into_model method to match pretrained
+    # weights of the T5 architecture with our model (since self.t5 is our T5 model)
+    base_model_prefix = "t5"
+
     def __init__(self, config: T5Config):
         super().__init__(config)
         self.t5 = T5ForConditionalGeneration(config)
