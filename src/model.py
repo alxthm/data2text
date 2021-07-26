@@ -7,6 +7,7 @@ from transformers import (
     T5Config,
 )
 from src.data.formatting import add_prefix
+from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
 class T5Custom(T5PreTrainedModel):
     def __init__(self, config: T5Config):
@@ -109,5 +110,5 @@ class T5Custom(T5PreTrainedModel):
 
 
     def _reorder_cache(self, past, beam_idx):
-        return self.t5_for_conditional_generation._reorder_cache(past, bean_idx)
+        return self.t5_for_conditional_generation._reorder_cache(past, beam_idx)
             

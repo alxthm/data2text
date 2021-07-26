@@ -1,10 +1,11 @@
 mlflow:
+  user: "nada"
   tracking_uri: "http://127.0.0.1:5000/"
   experiment_name: "Nada_D2T"
 
 seed: 0
 mode: "both_unsup"
-fast_dev_run: True
+fast_dev_run: False
 
 # training
 model: "t5-base"

@@ -113,7 +113,7 @@ def main(timestamp: str):
     if use_loggers:
 
 
-        if conf.user=='nada':
+        if conf.mlflow.user=='nada':
             mlflow.set_tracking_uri(conf.mlflow.tracking_uri)
             mlflow.set_experiment(conf.mlflow.experiment_name)
         else:
