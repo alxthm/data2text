@@ -288,6 +288,8 @@ class Seq2seqTrainer:
             # training_samples = {"noisy_text": ["sentence", "sentence2", "sentence3"]}
             training_samples = {}
             for name, token_ids in kwargs.items():
+                if token_ids is None:
+                    continue
                 token_ids = self.accelerator.gather(token_ids)
                 # decode the tensor of token ids into a list of strings
                 # (one per example of the batch)
