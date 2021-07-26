@@ -15,6 +15,12 @@ from accelerate import Accelerator
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
+# Load config
+from omegaconf import OmegaConf
+
+project_dir = Path(__file__).resolve().parents[1]
+conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+
 
 class Mode(Enum):
     t2g = "t2g"
@@ -102,7 +108,7 @@ class MyLogger:
             os.makedirs(file_path.parent, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(text)
-                
+
             if self.use_loggers:
                 # log it to mlflow
                 mlflow.log_artifact(str(file_path), folder_name)
@@ -119,24 +125,24 @@ class MyLogger:
             mlflow.log_artifact(filename, f"model_{tag}.pt")
 
 
-def update_artifacts_path():
-    # change artifacts locations from hdfs to viewfs, as recommended
-    # on mlflow slack channel
-    import mlflow
-
-    mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
-    experiment_name = "al.thomas_data_2_text"
-    experiment = mlflow.get_experiment_by_name(experiment_name)
-    mlflow.set_experiment(experiment_name)
-    run_ids = mlflow.search_runs(
-        experiment_ids=experiment.experiment_id
-    ).run_id.to_list()
-    for run_id in run_ids:
-        with mlflow.start_run(run_id) as run:
-            print(run_id)
-            mlflow.update_artifacts_location(
-                f"viewfs://prod-am6/user/c.fang/mlflow_artifacts/{run_id}/artifacts"
-            )
+# def update_artifacts_path():
+#     # change artifacts locations from hdfs to viewfs, as recommended
+#     # on mlflow slack channel
+#     import mlflow
+#
+#     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
+#     experiment_name = "al.thomas_data_2_text"
+#     experiment = mlflow.get_experiment_by_name(experiment_name)
+#     mlflow.set_experiment(experiment_name)
+#     run_ids = mlflow.search_runs(
+#         experiment_ids=experiment.experiment_id
+#     ).run_id.to_list()
+#     for run_id in run_ids:
+#         with mlflow.start_run(run_id) as run:
+#             print(run_id)
+#             mlflow.update_artifacts_location(
+#                 f"viewfs://prod-am6/user/c.fang/mlflow_artifacts/{run_id}/artifacts"
+#             )
 
 
 def seed_everything(seed: int):
