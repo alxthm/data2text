@@ -7,7 +7,7 @@ import mlflow
 from accelerate import Accelerator
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer, T5ForConditionalGeneration
+from transformers import AutoTokenizer
 
 from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat
@@ -112,8 +112,7 @@ def main(timestamp: str):
 
     if use_loggers:
 
-
-        if conf.mlflow.user=='nada':
+        if conf.mlflow.user == "nada":
             mlflow.set_tracking_uri(conf.mlflow.tracking_uri)
             mlflow.set_experiment(conf.mlflow.experiment_name)
         else:
