@@ -87,21 +87,11 @@ class Seq2seqTrainer:
         self.evaluator = evaluator
 
     def predict(self, input_ids: torch.Tensor, target: str):
-        input_ids = add_prefix(
-            input_ids=input_ids,
-            target=target,
-            tokenizer=self.tokenizer,
-            max_seq_len=self.max_seq_length,
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        # todo: try sampling instead of greedy ? better results?
+        prediction_ids = model.generate_with_prefix(
+            input_ids, target, self.tokenizer, self.max_seq_length
         )
-        self.ddp_model.eval()
-        with torch.no_grad():
-            model = self.accelerator.unwrap_model(self.ddp_model)
-            # todo: try sampling instead of greedy ? better results?
-            prediction_ids = model.generate(
-                input_ids,
-                max_length=self.max_seq_length,
-                num_beams=1,
-            )
         # multi-GPU: no need to gather predictions across processes yet, since the
         # predictions are to be used in training (gathering is down after the loss is computed)
         return prediction_ids

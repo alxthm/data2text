@@ -1,8 +1,12 @@
 # data
 data/raw/genwiki/
 data/processed/
+
+# other files
 **/.DS_Store
 src/eval/webnlg_g2t/metrics/meteor-1.5/
+conf/*
+!conf/example_conf.yaml
 
 # model checkpoints
 models/

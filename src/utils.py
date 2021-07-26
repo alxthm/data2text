@@ -140,24 +140,24 @@ class MyLogger:
             mlflow.log_artifact(filename, f"model_{tag}.pt")
 
 
-def update_artifacts_path():
-    # change artifacts locations from hdfs to viewfs, as recommended
-    # on mlflow slack channel
-    import mlflow
-
-    mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
-    experiment_name = "al.thomas_data_2_text"
-    experiment = mlflow.get_experiment_by_name(experiment_name)
-    mlflow.set_experiment(experiment_name)
-    run_ids = mlflow.search_runs(
-        experiment_ids=experiment.experiment_id
-    ).run_id.to_list()
-    for run_id in run_ids:
-        with mlflow.start_run(run_id) as run:
-            print(run_id)
-            mlflow.update_artifacts_location(
-                f"viewfs://prod-am6/user/c.fang/mlflow_artifacts/{run_id}/artifacts"
-            )
+# def update_artifacts_path():
+#     # change artifacts locations from hdfs to viewfs, as recommended
+#     # on mlflow slack channel
+#     import mlflow
+#
+#     mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in")
+#     experiment_name = "al.thomas_data_2_text"
+#     experiment = mlflow.get_experiment_by_name(experiment_name)
+#     mlflow.set_experiment(experiment_name)
+#     run_ids = mlflow.search_runs(
+#         experiment_ids=experiment.experiment_id
+#     ).run_id.to_list()
+#     for run_id in run_ids:
+#         with mlflow.start_run(run_id) as run:
+#             print(run_id)
+#             mlflow.update_artifacts_location(
+#                 f"viewfs://prod-am6/user/c.fang/mlflow_artifacts/{run_id}/artifacts"
+#             )
 
 
 def seed_everything(seed: int):

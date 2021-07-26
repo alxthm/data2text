@@ -176,11 +176,11 @@ class EvaluatorWebNLG:
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
         # get raw batch predictions
         model = self.accelerator.unwrap_model(self.ddp_model)
-
-        text_predictions_ids = model.generate(
+        text_predictions_ids = model.generate_with_prefix(
             batch["graph_ids"],
-            max_length=self.max_output_length,
-            num_beams=self.num_beams_g2t,
+            target="text",
+            tokenizer=self.tokenizer,
+            max_seq_length=dataset.max_seq_length,
         )
         # make sure seq_len is the same for each process, before gathering
         text_predictions_ids = self.accelerator.pad_across_processes(
@@ -246,10 +246,12 @@ class EvaluatorWebNLG:
 
         # get raw batch predictions
         # shape: (N, max_seq_len), with max_seq_len depending on the batch (dynamically padded)
-        graph_prediction_ids = self.accelerator.unwrap_model(self.ddp_model).generate(
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        graph_prediction_ids = model.generate_with_prefix(
             batch["text_ids"],
-            max_length=self.max_output_length,
-            num_beams=self.num_beams_t2g,
+            target="graph",
+            tokenizer=self.tokenizer,
+            max_seq_length=dataset.max_seq_length,
         )
         # make sure seq_len is the same for each process, before gathering
         graph_prediction_ids = self.accelerator.pad_across_processes(
