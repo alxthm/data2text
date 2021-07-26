@@ -283,7 +283,10 @@ class Seq2seqTrainer:
         return noisy_ids
 
     def log_training_samples(self, global_step: int, epoch: int, **kwargs):
-        if global_step % self.log_every_n_steps == 0:
+        if (
+            global_step % self.log_every_n_steps == 0
+            and self.accelerator.is_local_main_process
+        ):
             # make missing predictions
             if "graph_pred_ids" not in kwargs.keys():
                 kwargs["graph_pred_ids"] = self.predict(
@@ -300,7 +303,6 @@ class Seq2seqTrainer:
             for name, token_ids in kwargs.items():
                 if token_ids is None:
                     continue
-                token_ids = self.accelerator.gather(token_ids)
                 # decode the tensor of token ids into a list of strings
                 # (one per example of the batch)
                 sentences = self.tokenizer.batch_decode(
