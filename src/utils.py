@@ -72,6 +72,9 @@ class MyLogger:
         self.use_loggers = use_loggers
 
         self.steps_since_last_log = 0
+        # current log files that we are updating during the epoch
+        # (and that we may want to send to mlflow at the end of the epoch)
+        self.current_logs = set()
         self.metrics = Counter()
 
     def log_metrics(self, metrics: Dict[str, float], step: int):
@@ -96,16 +99,34 @@ class MyLogger:
                     for k, v in avg_metrics.items():
                         self.tb_writer.add_scalar(k, v, global_step=step)
 
-    def log_text(self, text: str, file_path: Path, folder_name: str):
+    def log_text(self, text: str, file_path: Path, folder_name: str, one_time_log=True):
+        """
+        Save `text` inside the file located at `file_path`. If the file does not exist,
+        create a new one, otherwise append the text.
+
+        If we are using mlflow logs and this is a one_time_log (i.e. we have an
+        entire log file, and we are not appending to an existing log file), then log it
+        as an mlflow artifact in folder `folder_name`
+        """
         if len(text) > 0 and self.accelerator.is_main_process:
             # save text file to disk
             os.makedirs(file_path.parent, exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
+            with open(file_path, "a", encoding="utf-8") as f:
                 f.write(text)
-                
+
             if self.use_loggers:
-                # log it to mlflow
+                if one_time_log:
+                    # log it to mlflow
+                    mlflow.log_artifact(str(file_path), folder_name)
+                else:
+                    # save it to log it to mlflow later
+                    self.current_logs.add((file_path, folder_name))
+
+    def send_current_logs(self):
+        for file_path, folder_name in self.current_logs:
+            if self.use_loggers:
                 mlflow.log_artifact(str(file_path), folder_name)
+        self.current_logs = set()
 
     def save_model(self, ddp_model, run_name: str, tag: str):
         self.accelerator.wait_for_everyone()

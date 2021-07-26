@@ -272,3 +272,10 @@ class Seq2seqTrainer:
         batch_encoding = batch_encoding.to(input_ids.device)
         noisy_ids = batch_encoding.input_ids
         return noisy_ids
+
+    def log_training_samples(self, **kwargs):
+        # todo: transform xxx_ids batches in kwargs into text
+        training_samples = {"noisy_text": ["ok", "ok", "okokok"]}
+        log = "blblb"
+        self.logger.log_text(text=log, file_path=file_path, folder_name=folder)
+
