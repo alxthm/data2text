@@ -284,6 +284,16 @@ class Seq2seqTrainer:
 
     def log_training_samples(self, global_step: int, epoch: int, **kwargs):
         if global_step % self.log_every_n_steps == 0:
+            # make missing predictions
+            if "graph_pred_ids" not in kwargs.keys():
+                kwargs["graph_pred_ids"] = self.predict(
+                    input_ids=kwargs["text_ids"], target="graph"
+                )
+            if "text_pred_ids" not in kwargs.keys():
+                kwargs["text_pred_ids"] = self.predict(
+                    input_ids=kwargs["graph_ids"], target="text"
+                )
+
             # in the end we want:
             # training_samples = {"noisy_text": ["sentence", "sentence2", "sentence3"]}
             training_samples = {}
