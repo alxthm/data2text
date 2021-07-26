@@ -111,14 +111,8 @@ def main(timestamp: str):
     trainer.set_evaluator(evaluator)
 
     if use_loggers:
-
-        if conf.mlflow.user == "nada":
-            mlflow.set_tracking_uri(conf.mlflow.tracking_uri)
-            mlflow.set_experiment(conf.mlflow.experiment_name)
-        else:
-            mlflow.set_tracking_uri("https://mlflow.par.prod.crto.in/")
-            mlflow.set_experiment("al.thomas_d2t_3")
-
+        mlflow.set_tracking_uri(conf.mlflow.tracking_uri)
+        mlflow.set_experiment(conf.mlflow.experiment_name)
         with mlflow.start_run(run_name=run_name):
             mlflow_log_src_and_config(conf, project_dir)
             # train model

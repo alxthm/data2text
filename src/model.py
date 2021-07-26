@@ -73,7 +73,7 @@ class T5Custom(T5PreTrainedModel):
     def forward(self, *args, **kwargs):
         return self.t5.forward(*args, **kwargs)
 
-    def predict_(
+    def generate_with_prefix(
         self,
         input_ids: torch.Tensor,
         target: str,
