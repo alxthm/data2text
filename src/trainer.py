@@ -1,5 +1,6 @@
 import logging
 import random
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -35,6 +36,7 @@ class Seq2seqTrainer:
         batch_size: int,
         num_epochs: int,
         tensorboard_writer: SummaryWriter,
+        log_path: Path,
         log_every_n_steps: int,
         max_grad_norm: float,
         max_training_steps: int = -1,
@@ -76,6 +78,8 @@ class Seq2seqTrainer:
         self.max_grad_norm = max_grad_norm
 
         # logging
+        self.log_path = log_path
+        self.log_every_n_steps = log_every_n_steps
         self.logger = MyLogger(
             tensorboard_writer=tensorboard_writer,
             log_every_n_steps=log_every_n_steps,
@@ -156,6 +160,10 @@ class Seq2seqTrainer:
                 loss_t2g = torch.tensor(0)
                 loss_text = torch.tensor(0)
                 loss_graph = torch.tensor(0)
+                text_pred_ids = None
+                graph_pred_ids = None
+                noisy_text_ids = None
+                noisy_graph_ids = None
                 if self.mode == Mode.t2g:
                     loss_t2g = self.teach_model_one_step(
                         input_ids=text_ids, label_ids=graph_ids, target="graph"
@@ -222,9 +230,20 @@ class Seq2seqTrainer:
                     },
                     step=global_step,
                 )
+                self.log_training_samples(
+                    global_step,
+                    epoch,
+                    text_ids=text_ids,
+                    graph_ids=graph_ids,
+                    text_pred_ids=text_pred_ids,
+                    graph_pred_ids=graph_pred_ids,
+                    noisy_text_ids=noisy_text_ids,
+                    noisy_graph_ids=noisy_graph_ids,
+                )
 
             # evaluate after each epoch (and save model checkpoint if necessary)
             self.evaluator.on_epoch_end(epoch)
+            self.logger.send_current_logs()
 
         # evaluate on test set
         #   todo: remove when tuning hyperparameters, to make sure we don't overfit on test set
@@ -263,9 +282,32 @@ class Seq2seqTrainer:
         noisy_ids = batch_encoding.input_ids
         return noisy_ids
 
-    def log_training_samples(self, **kwargs):
-        # todo: transform xxx_ids batches in kwargs into text
-        training_samples = {"noisy_text": ["ok", "ok", "okokok"]}
-        log = "blblb"
-        self.logger.log_text(text=log, file_path=file_path, folder_name=folder)
+    def log_training_samples(self, global_step: int, epoch: int, **kwargs):
+        if global_step % self.log_every_n_steps == 0:
+            # in the end we want:
+            # training_samples = {"noisy_text": ["sentence", "sentence2", "sentence3"]}
+            training_samples = {}
+            for name, token_ids in kwargs.items():
+                token_ids = self.accelerator.gather(token_ids)
+                # decode the tensor of token ids into a list of strings
+                # (one per example of the batch)
+                sentences = self.tokenizer.batch_decode(
+                    token_ids, skip_special_tokens=True
+                )
+                if name.endswith("_ids"):
+                    name = name[:-4]
+                training_samples[name] = sentences
 
+            # format log text
+            log = f"[{global_step}] {', '.join(training_samples.keys())}\n"
+            batch_size = len(training_samples["text"])
+            batch_logs = ["" for _ in range(batch_size)]
+            for sentences in training_samples.values():
+                for i, s in enumerate(sentences):
+                    # concatenate all sentences for the same batch example together
+                    batch_logs[i] += f"{s}\n"
+            log += "-\n".join(batch_logs)
+
+            # save logs to disk
+            logs_path = self.log_path / f"training/{epoch}.txt"
+            self.logger.log_text(text=log, file_path=logs_path, folder_name="training")

@@ -116,13 +116,14 @@ class MyLogger:
 
             if self.use_loggers:
                 if one_time_log:
-                    # log it to mlflow
+                    # log the file to mlflow
                     mlflow.log_artifact(str(file_path), folder_name)
                 else:
-                    # save it to log it to mlflow later
+                    # register the file to be logged to mlflow later (potentially after other updates)
                     self.current_logs.add((file_path, folder_name))
 
     def send_current_logs(self):
+        # log to mlflow current files (saved to disk) that we are done updating
         for file_path, folder_name in self.current_logs:
             if self.use_loggers:
                 mlflow.log_artifact(str(file_path), folder_name)
