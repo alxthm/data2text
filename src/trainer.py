@@ -324,4 +324,9 @@ class Seq2seqTrainer:
 
             # save logs to disk
             logs_path = self.log_path / f"training/{epoch}.txt"
-            self.logger.log_text(text=log, file_path=logs_path, folder_name="training")
+            self.logger.log_text(
+                text=log,
+                file_path=logs_path,
+                folder_name="training",
+                one_time_log=False,  # don't log to mlflow until the end of the epoch
+            )
