@@ -88,6 +88,7 @@ def main(timestamp: str):
         batch_size=conf.batch_size_train,
         num_epochs=conf.epochs,
         tensorboard_writer=tb_writer,
+        log_path=project_dir / f"models/{run_name}",
         log_every_n_steps=conf.log_every_n_steps,
         max_grad_norm=conf.max_grad_norm,
         max_training_steps=3 if conf.fast_dev_run else -1,

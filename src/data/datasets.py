@@ -150,7 +150,7 @@ class Seq2seqDataset(Dataset, ABC):
         assert (
             text_tok.input_ids.size(0) == graph_tok.input_ids.size(0) == len(examples)
         )
-
+        # todo: have a better look at graph_ids -> why is there no space before the TAIL/TYPE tokens?
         features = []
         for i, (text_ids, att_mask_text, graph_ids, att_mask_graph) in enumerate(
             zip(
