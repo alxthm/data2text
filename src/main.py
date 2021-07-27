@@ -13,7 +13,7 @@ from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat
 from src.eval.evaluator import EvaluatorWebNLG
 from src.trainer import Seq2seqTrainer
-from src.model import T5Custom
+from src.model import T5Custom, T5FCGCustom
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -72,7 +72,7 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model
-    model = T5Custom.from_pretrained(conf.model)
+    model = T5FCGCustom.from_pretrained(conf.model)
     # extend embedding matrices to include our separator tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")
