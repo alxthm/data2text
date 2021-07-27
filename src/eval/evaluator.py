@@ -63,7 +63,8 @@ class EvaluatorWebNLG:
         self.checkpoints = checkpoints
 
     def on_epoch_end(self, epoch: int):
-        self.evaluate_and_log(epoch, split="dev")
+        if self.accelerator.is_local_main_process:
+            self.evaluate_and_log(epoch, split="dev")
 
         if self.checkpoints == "on_epoch_end":
             self.logger.save_model(
@@ -71,10 +72,11 @@ class EvaluatorWebNLG:
             )
 
     def on_training_end(self):
-        self.evaluate_and_log(-1, split="test_all")
-        self.evaluate_and_log(-1, split="test_seen")
-        self.evaluate_and_log(-1, split="test_unseen_ent")
-        self.evaluate_and_log(-1, split="test_unseen_cat")
+        if self.accelerator.is_local_main_process:
+            self.evaluate_and_log(-1, split="test_all")
+            self.evaluate_and_log(-1, split="test_seen")
+            self.evaluate_and_log(-1, split="test_unseen_ent")
+            self.evaluate_and_log(-1, split="test_unseen_cat")
 
         if self.checkpoints == "on_training_end":
             self.logger.save_model(
@@ -104,7 +106,7 @@ class EvaluatorWebNLG:
             metrics_t2g, logs_t2g = self.run_evaluation_t2g(dataset, split)
             metrics_g2t, logs_g2t = self.run_evaluation_g2t(dataset, split, epoch=epoch)
             metrics = {**metrics_t2g, **metrics_g2t}
-            # make sure we don't override some metrics
+            # make sure we don't define some metrics twice
             if len(metrics_t2g.keys() & metrics_g2t.keys()) > 0:
                 duplicated_keys = metrics_t2g.keys() & metrics_g2t.keys()
                 logging.warning(f"Duplicated keys in eval metrics: {duplicated_keys}")
@@ -129,16 +131,11 @@ class EvaluatorWebNLG:
             shuffle=False,
             collate_fn=default_data_collator,
         )
-        dataloader = self.accelerator.prepare(dataloader)
         text_predictions = []
         logs = ""
-        for i, batch in tqdm(
-            enumerate(dataloader),
-            total=len(dataloader),
-            disable=not self.accelerator.is_local_main_process,
-        ):
+        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
             if self.limit_samples and (i + 1) * self.batch_size > self.limit_samples:
-                # to speed up validation, do not consider all samples
+                # to speed up validation (for a quick test), do not consider all samples
                 break
             batch_preds, batch_logs = self.make_pred_g2t_batch(batch, dataset)
             text_predictions += batch_preds
@@ -156,51 +153,42 @@ class EvaluatorWebNLG:
         refs_path = data_dir / f"processed/{dataset.dataset_name}/ref/{split}_<id>.txt"
         # todo: this is a hack, make it more robust?
         num_refs = 3 if split == "test_unseen_ent" else 4
-        if self.accelerator.is_main_process:
-            metrics = run_webnlg_g2t_eval(
-                refs_path=str(refs_path.resolve()),
-                hyps_path=hyps_path,
-                num_refs=num_refs,
-                lng="en",
-                metrics="bleu,meteor,bert",
-                # all official WebNLG2020 metrics
-                # metrics="bleu,meteor,chrf++,ter,bert,bleurt",
-            )
-            metrics = {f"{split}/{k}": v for k, v in metrics.items()}
-        else:
-            # multi-GPU: we don't save anything to the drive from other processes,
-            # so we cannot compute metrics from prediction text files
-            metrics = {}
+        metrics = run_webnlg_g2t_eval(
+            refs_path=str(refs_path.resolve()),
+            hyps_path=hyps_path,
+            num_refs=num_refs,
+            lng="en",
+            metrics="bleu,meteor,bert",
+            # all official WebNLG2020 metrics
+            # metrics="bleu,meteor,chrf++,ter,bert,bleurt",
+        )
+        metrics = {f"{split}/{k}": v for k, v in metrics.items()}
         return metrics, logs
 
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
         # get raw batch predictions
         model = self.accelerator.unwrap_model(self.ddp_model)
         text_predictions_ids = model.generate_with_prefix(
-            batch["graph_ids"],
+            batch["graph_ids"].to(self.accelerator.device),
             target="text",
             tokenizer=self.tokenizer,
             max_seq_length=dataset.max_seq_length,
         )
-        # make sure seq_len is the same for each process, before gathering
-        text_predictions_ids = self.accelerator.pad_across_processes(
-            text_predictions_ids, dim=1, pad_index=self.tokenizer.pad_token_id
-        )
-        # gather predictions from all devices
-        text_predictions_ids = self.accelerator.gather(text_predictions_ids)
         # transform predictions and references to plain text (detokenized)
         text_predictions = self.tokenizer.batch_decode(
             text_predictions_ids, skip_special_tokens=True
         )
         references = self.tokenizer.batch_decode(
-            self.accelerator.gather(batch["text_ids"]), skip_special_tokens=True
+            batch["text_ids"].to(self.accelerator.device), skip_special_tokens=True
         )
 
         # log predictions and reference texts
         logs = ""
         assert len(text_predictions) == len(references)
         for example_id, text, ref in zip(
-            self.accelerator.gather(batch["example_id"]), text_predictions, references
+            batch["example_id"].to(self.accelerator.device),
+            text_predictions,
+            references,
         ):
             example = dataset.get_example(example_id)
             logs += (
@@ -220,15 +208,10 @@ class EvaluatorWebNLG:
             shuffle=False,  # if using shuffle and dataset.get_example(id), make sure that id is correct
             collate_fn=default_data_collator,
         )
-        dataloader = self.accelerator.prepare(dataloader)
 
         t2g_results = Counter()
         logs = ""
-        for i, batch in tqdm(
-            enumerate(dataloader),
-            total=len(dataloader),
-            disable=not self.accelerator.is_local_main_process,
-        ):
+        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
             if self.limit_samples and (i + 1) * self.batch_size > self.limit_samples:
                 # to speed up validation, do not consider all samples
                 break
@@ -248,21 +231,17 @@ class EvaluatorWebNLG:
         # shape: (N, max_seq_len), with max_seq_len depending on the batch (dynamically padded)
         model = self.accelerator.unwrap_model(self.ddp_model)
         graph_prediction_ids = model.generate_with_prefix(
-            batch["text_ids"],
+            batch["text_ids"].to(self.accelerator.device),
             target="graph",
             tokenizer=self.tokenizer,
             max_seq_length=dataset.max_seq_length,
         )
-        # make sure seq_len is the same for each process, before gathering
-        graph_prediction_ids = self.accelerator.pad_across_processes(
-            graph_prediction_ids, dim=1, pad_index=self.tokenizer.pad_token_id
-        )
 
         for example_id, text_ids, graph_label_ids, graph_pred_ids in zip(
-            self.accelerator.gather(batch["example_id"]),
-            self.accelerator.gather(batch["text_ids"]),
-            self.accelerator.gather(batch["graph_ids"]),
-            self.accelerator.gather(graph_prediction_ids),
+            batch["example_id"].to(self.accelerator.device),
+            batch["text_ids"].to(self.accelerator.device),
+            batch["graph_ids"].to(self.accelerator.device),
+            graph_prediction_ids,
         ):
             # decode the token ids (of prediction, label and input)
             example = dataset.get_example(example_id)
