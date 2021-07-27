@@ -86,6 +86,7 @@ def main(timestamp: str):
         accelerator=accelerator,
         learning_rate=conf.lr,
         batch_size=conf.batch_size_train,
+        noise_fn=conf.sample_noise_fun,
         num_epochs=conf.epochs,
         tensorboard_writer=tb_writer,
         log_path=project_dir / f"models/{run_name}",
