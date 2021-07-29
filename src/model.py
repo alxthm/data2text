@@ -125,3 +125,38 @@ class T5Custom(T5PreTrainedModel):
 
     def _reorder_cache(self, past, beam_idx):
         return self.t5._reorder_cache(past, beam_idx)
+
+
+
+class T5FCGCustom(T5ForConditionalGeneration):
+    def __init__(self, config: T5Config):
+        super().__init__(config)
+
+
+
+    def generate_with_prefix(
+        self,
+        input_ids: torch.Tensor,
+        target: str,
+        tokenizer: PreTrainedTokenizer,
+        max_seq_length: int,
+        ): 
+
+        input_ids = add_prefix(
+            input_ids=input_ids,
+            target=target,
+            tokenizer=tokenizer,
+            max_seq_len=max_seq_length,
+        )
+        
+        self.eval()
+        with torch.no_grad():
+            prediction_ids = self.generate(
+                input_ids,
+                max_length=max_seq_length,
+                num_beams=1,
+            )
+        
+        return prediction_ids
+
+
