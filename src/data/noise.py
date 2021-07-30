@@ -253,4 +253,10 @@ def repeat(seq, is_graph):
         return repeat_text(seq), is_graph
 
 
-noise_functions_list = [swap, drop, blank, rule, repeat]
+existing_noise_functions = {
+    "swap": swap,
+    "drop": drop,
+    "blank": blank,
+    "rule": rule,
+    "repeat": repeat,
+}
