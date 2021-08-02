@@ -13,7 +13,7 @@ from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat
 from src.eval.evaluator import EvaluatorWebNLG
 from src.trainer import Seq2seqTrainer
-from src.model import T5Custom, T5FCGCustom
+from src.model import T5Custom
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -37,6 +37,8 @@ def main(timestamp: str):
     conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     logging.info(OmegaConf.to_yaml(conf))
+    conf.use_fp16 = accelerator.use_fp16
+    conf.num_processes = accelerator.num_processes
 
     # seed everything
     seed_everything(conf.seed)
@@ -72,7 +74,7 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model
-    model = T5FCGCustom.from_pretrained(conf.model)
+    model = T5Custom.from_pretrained(conf.model)
     # extend embedding matrices to include our separator tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")

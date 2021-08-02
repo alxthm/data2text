@@ -62,11 +62,10 @@ class Seq2seqTrainer:
 
         # training parameters
         if max_training_steps > 0:
-            self.num_training_steps = max_training_steps
-            self.num_epochs = 1
+            self.num_training_steps = max_training_steps * num_epochs
         else:
             self.num_training_steps = num_epochs * len(self.train_dataloader)
-            self.num_epochs = num_epochs
+        self.num_epochs = num_epochs
         self.lr_scheduler = get_scheduler(
             "linear",
             optimizer=self.optimizer,
@@ -144,7 +143,7 @@ class Seq2seqTrainer:
                 disable=not self.accelerator.is_local_main_process,
             ):
                 # stop training if a max number of steps was specified
-                if global_step > self.num_training_steps:
+                if global_step > self.num_training_steps * (epoch + 1):
                     break
 
                 # get batch data
@@ -288,11 +287,11 @@ class Seq2seqTrainer:
             and self.accelerator.is_local_main_process
         ):
             # make missing predictions
-            if "graph_pred_ids" not in kwargs.keys():
+            if kwargs["graph_pred_ids"] is None:
                 kwargs["graph_pred_ids"] = self.predict(
                     input_ids=kwargs["text_ids"], target="graph"
                 )
-            if "text_pred_ids" not in kwargs.keys():
+            if kwargs["text_pred_ids"] is None:
                 kwargs["text_pred_ids"] = self.predict(
                     input_ids=kwargs["graph_ids"], target="text"
                 )
