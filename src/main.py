@@ -36,9 +36,9 @@ def main(timestamp: str):
     project_dir = Path(__file__).resolve().parents[1]
     conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
-    logging.info(OmegaConf.to_yaml(conf))
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
+    logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
     seed_everything(conf.seed)
