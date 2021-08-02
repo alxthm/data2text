@@ -1,6 +1,7 @@
 import logging
 import random
 from pathlib import Path
+from typing import List
 
 import torch
 from torch.utils.data import DataLoader
@@ -16,7 +17,7 @@ from accelerate import Accelerator
 
 from src.data.datasets import Seq2seqDataset
 from src.data.formatting import add_prefix
-from src.data.noise_functions import noise_functions_list
+from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
 from src.utils import MyLogger, Mode
 
@@ -35,6 +36,7 @@ class Seq2seqTrainer:
         learning_rate: float,
         batch_size: int,
         num_epochs: int,
+        noise_fn: List[str],
         tensorboard_writer: SummaryWriter,
         log_path: Path,
         log_every_n_steps: int,
@@ -75,6 +77,7 @@ class Seq2seqTrainer:
         self.batch_size = batch_size
         self.max_seq_length = train_dataset.max_seq_length
         self.max_grad_norm = max_grad_norm
+        self.noise_functions = noise_fn
 
         # logging
         self.log_path = log_path
@@ -265,7 +268,8 @@ class Seq2seqTrainer:
         # add noise to the texts/graphs
         noisy_inputs = []
         for text in texts:
-            noise_fun = random.choice(noise_functions_list)
+            noise_fun_name = random.choice(self.noise_functions)
+            noise_fun = existing_noise_functions[noise_fun_name]
             # todo: try composing noise functions?
             noisy_text, _ = noise_fun(text, is_graph=is_graph)
             noisy_inputs.append(noisy_text)
