@@ -3,11 +3,17 @@ mlflow:
   experiment_name: "Nada_D2T"
 
 seed: 0
-mode: "both_unsup"
+model: "t5-base"
 fast_dev_run: False
 
 # training
-model: "t5-base"
+mode: "both_unsup"
+sample_noise_fun:  # which noise functions to sample from?
+  - "swap"
+  - "drop"
+  - "blank"
+  - "rule"
+  - "repeat"
 epochs: 5
 lr: 1.0e-4
 batch_size_train: 4
