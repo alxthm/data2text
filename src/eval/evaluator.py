@@ -173,6 +173,8 @@ class EvaluatorWebNLG:
             target="text",
             tokenizer=self.tokenizer,
             max_seq_length=dataset.max_seq_length,
+            method="beam_search",
+            num_beams=self.num_beams_t2g,
         )
         # transform predictions and references to plain text (detokenized)
         text_predictions = self.tokenizer.batch_decode(
@@ -235,6 +237,8 @@ class EvaluatorWebNLG:
             target="graph",
             tokenizer=self.tokenizer,
             max_seq_length=dataset.max_seq_length,
+            method="beam_search",
+            num_beams=self.num_beams_t2g,
         )
 
         for example_id, text_ids, graph_label_ids, graph_pred_ids in zip(

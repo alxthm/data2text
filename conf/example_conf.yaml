@@ -8,16 +8,18 @@ fast_dev_run: False
 
 # training
 mode: "both_unsup"
+epochs: 5
+lr: 1.0e-4
+batch_size_train: 4
+max_grad_norm: 1.0
+# training (specific to unsupervised)
+generate_method: "greedy"  # 'greedy', 'sample', 'top_k'
 sample_noise_fun:  # which noise functions to sample from?
   - "swap"
   - "drop"
   - "blank"
   - "rule"
   - "repeat"
-epochs: 5
-lr: 1.0e-4
-batch_size_train: 4
-max_grad_norm: 1.0
 
 # validation
 num_beams_t2g: 8

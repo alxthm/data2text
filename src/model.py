@@ -79,6 +79,8 @@ class T5Custom(T5PreTrainedModel):
         target: str,
         tokenizer: PreTrainedTokenizer,
         max_seq_length: int,
+        method: str,
+        num_beams=-1,
     ):
         input_ids = add_prefix(
             input_ids=input_ids,
@@ -88,11 +90,26 @@ class T5Custom(T5PreTrainedModel):
         )
         self.eval()
         with torch.no_grad():
-            prediction_ids = self.generate(
-                input_ids,
-                max_length=max_seq_length,
-                num_beams=1,
-            )
+            if method == "greedy":
+                prediction_ids = self.generate(input_ids, max_length=max_seq_length)
+            elif method == "beam_search":
+                assert num_beams > 1
+                prediction_ids = self.generate(
+                    input_ids,
+                    max_length=max_seq_length,
+                    num_beams=num_beams,
+                    early_stopping=True,
+                )
+            elif method == "sample":
+                prediction_ids = self.generate(
+                    input_ids, max_length=max_seq_length, do_sample=True, top_k=0
+                )
+            elif method == "top_k":
+                prediction_ids = self.generate(
+                    input_ids, max_length=max_seq_length, do_sample=True, top_k=50
+                )
+            else:
+                raise ValueError
 
         return prediction_ids
 

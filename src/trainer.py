@@ -37,6 +37,7 @@ class Seq2seqTrainer:
         batch_size: int,
         num_epochs: int,
         noise_fn: List[str],
+        generate_method: str,
         tensorboard_writer: SummaryWriter,
         log_path: Path,
         log_every_n_steps: int,
@@ -78,6 +79,7 @@ class Seq2seqTrainer:
         self.max_seq_length = train_dataset.max_seq_length
         self.max_grad_norm = max_grad_norm
         self.noise_functions = noise_fn
+        self.generate_method = generate_method
 
         # logging
         self.log_path = log_path
@@ -94,9 +96,8 @@ class Seq2seqTrainer:
 
     def predict(self, input_ids: torch.Tensor, target: str):
         model = self.accelerator.unwrap_model(self.ddp_model)
-        # todo: try sampling instead of greedy ? better results?
         prediction_ids = model.generate_with_prefix(
-            input_ids, target, self.tokenizer, self.max_seq_length
+            input_ids, target, self.tokenizer, self.max_seq_length, self.generate_method
         )
         # multi-GPU: no need to gather predictions across processes yet, since the
         # predictions are to be used in training (gathering is down after the loss is computed)
