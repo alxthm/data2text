@@ -16,7 +16,6 @@ from transformers import (
 from accelerate import Accelerator
 
 from src.data.datasets import Seq2seqDataset
-from src.data.formatting import add_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
 from src.utils import MyLogger, Mode
@@ -96,7 +95,7 @@ class Seq2seqTrainer:
         model = self.accelerator.unwrap_model(self.ddp_model)
         # todo: try sampling instead of greedy ? better results?
         prediction_ids = model.generate_with_prefix(
-            input_ids, target, self.tokenizer, self.max_seq_length
+            input_ids, target, self.max_seq_length
         )
         # multi-GPU: no need to gather predictions across processes yet, since the
         # predictions are to be used in training (gathering is down after the loss is computed)
@@ -108,27 +107,23 @@ class Seq2seqTrainer:
         """
 
         Args:
-            input_ids: input sequence (text/graph tokenized batch, already on device, with prefix)
+            input_ids: input sequence (text/graph tokenized batch, already on device)
             label_ids: label (ground truth graph/text as a tokenized sequence)
             target: 'text' or 'graph', depending on the format of label sequences. Will
-                determine the prefix to add to input_ids
+                determine the prefix to add to decoder inputs
 
         Returns:
             loss
 
         """
-        input_ids = add_prefix(
-            input_ids=input_ids,
-            target=target,
-            tokenizer=self.tokenizer,
-            max_seq_len=self.max_seq_length,
-        )
+
         att_mask_input = self.get_att_mask(input_ids)
         self.ddp_model.train()
         outputs = self.ddp_model(
             input_ids=input_ids,
             attention_mask=att_mask_input,
             labels=label_ids,
+            target=target,
         )
         loss = outputs.loss
         self.accelerator.backward(loss)

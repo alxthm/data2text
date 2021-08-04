@@ -171,7 +171,6 @@ class EvaluatorWebNLG:
         text_predictions_ids = model.generate_with_prefix(
             batch["graph_ids"].to(self.accelerator.device),
             target="text",
-            tokenizer=self.tokenizer,
             max_seq_length=dataset.max_seq_length,
         )
         # transform predictions and references to plain text (detokenized)
@@ -233,7 +232,6 @@ class EvaluatorWebNLG:
         graph_prediction_ids = model.generate_with_prefix(
             batch["text_ids"].to(self.accelerator.device),
             target="graph",
-            tokenizer=self.tokenizer,
             max_seq_length=dataset.max_seq_length,
         )
 

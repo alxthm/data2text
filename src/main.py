@@ -60,6 +60,8 @@ def main(timestamp: str):
             GraphFormat.TYPE_TOKEN,
             GraphFormat.TAIL_TOKEN,
             GraphFormat.BLANK_TOKEN,
+            "[GENERATE TEXT]",
+            "[GENERATE GRAPH]",
         ]
     )
 
@@ -75,6 +77,9 @@ def main(timestamp: str):
 
     # prepare model
     model = T5Custom.from_pretrained(conf.model)
+    model.config.text_decoder_start_token_id = tokenizer.encode("[GENERATE TEXT]")[0]
+    model.config.graph_decoder_start_token_id = tokenizer.encode("[GENERATE GRAPH]")[0]
+
     # extend embedding matrices to include our separator tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")

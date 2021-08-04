@@ -179,4 +179,3 @@ def add_prefix(
     )
     batch_encoding = batch_encoding.to(input_ids.device)
     return batch_encoding.input_ids
-
