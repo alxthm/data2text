@@ -60,10 +60,15 @@ def main(timestamp: str):
         GraphFormat.TAIL_TOKEN,
         GraphFormat.BLANK_TOKEN,
     ]
+    tokenizer.add_tokens(new_tokens)
     if not conf.specify_target_with_prefix:
         # to be used as a start_token in decoder inputs
-        new_tokens += [GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN]
-    tokenizer.add_tokens(new_tokens)
+        # these ones are special tokens, since we do not want them
+        # when decoding the ids to plain text (and the generate method always
+        # return the decoder_start_token_id at the beginning of the output)
+        tokenizer.add_tokens(
+            [GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN], special_tokens=True
+        )
 
     # load data
     data_dir = project_dir / "data"
