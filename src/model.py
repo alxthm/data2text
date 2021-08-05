@@ -70,7 +70,7 @@ class GT8(T5PreTrainedModel):
         self.device_map = None
 
         self.specify_target_with_prefix = specify_target_with_prefix
-        if specify_target_with_prefix:
+        if not specify_target_with_prefix:
             self.generate_text_token_id = generate_text_token_id
             self.generate_graph_token_id = generate_graph_token_id
 
