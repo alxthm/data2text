@@ -34,6 +34,7 @@ class Seq2seqTrainer:
         train_dataset: Seq2seqDataset,
         accelerator: Accelerator,
         learning_rate: float,
+        lr_scheduler: str,
         batch_size: int,
         num_epochs: int,
         noise_fn: List[str],
@@ -70,7 +71,7 @@ class Seq2seqTrainer:
             self.num_training_steps = num_epochs * len(self.train_dataloader)
         self.num_epochs = num_epochs
         self.lr_scheduler = get_scheduler(
-            "linear",
+            name=lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=0,
             num_training_steps=self.num_training_steps,
