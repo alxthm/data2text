@@ -4,7 +4,7 @@ import warnings
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers import T5PreTrainedModel
+from transformers import T5PreTrainedModel, PreTrainedTokenizer
 from transformers.modeling_outputs import (
     BaseModelOutput,
     Seq2SeqLMOutput,
@@ -12,6 +12,8 @@ from transformers.modeling_outputs import (
 from transformers.models.t5.modeling_t5 import T5Stack
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
+
+from src.data.formatting import add_prefix
 
 logger = logging.get_logger(__name__)
 # Warning message for FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
@@ -35,7 +37,7 @@ class GT8(T5PreTrainedModel):
         r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
     ]
 
-    def __init__(self, config):
+    def __init__(self, config, specify_target_with_prefix: bool):
         super().__init__(config)
         self.model_dim = config.d_model
 
@@ -60,6 +62,8 @@ class GT8(T5PreTrainedModel):
         # Model parallel
         self.model_parallel = False
         self.device_map = None
+
+        self.specify_target_with_prefix = specify_target_with_prefix
 
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -376,3 +380,82 @@ class GT8(T5PreTrainedModel):
         ).item(), "Verify that `shifted_input_ids` has only positive values"
 
         return shifted_input_ids
+
+    def generate_with_target(
+        self,
+        input_ids: torch.Tensor,
+        target: str,
+        tokenizer: PreTrainedTokenizer,
+        max_seq_length: int,
+        method: str,
+        num_beams=-1,
+    ):
+        """
+
+        Args:
+            input_ids:
+            target: 'text' or 'graph'
+            tokenizer:
+            max_seq_length:
+            method: 'greedy', 'beam_search', 'sample' or 'top_k'
+            num_beams: Used only when method='beam_search'
+
+        Returns:
+
+        """
+        # specify the target format to the model
+        if self.specify_target_with_prefix:
+            input_ids = add_prefix(
+                input_ids=input_ids,
+                target=target,
+                tokenizer=tokenizer,
+                max_seq_len=max_seq_length,
+            )
+            decoder_start_token_id = None
+        else:
+            # don't touch the encoder_input_ids, but tell the decoder the target format
+            if target == "text":
+                decoder_start_token_id = self.config.text_decoder_start_token_id
+            elif target == "graph":
+                decoder_start_token_id = self.config.graph_decoder_start_token_id
+            else:
+                raise ValueError
+
+        self.eval()
+        with torch.no_grad():
+            # generate text according to the specified decoding method
+            if method == "greedy":
+                prediction_ids = self.generate(
+                    input_ids,
+                    max_length=max_seq_length,
+                    decoder_start_token_id=decoder_start_token_id,
+                )
+            elif method == "beam_search":
+                assert num_beams > 1
+                prediction_ids = self.generate(
+                    input_ids,
+                    max_length=max_seq_length,
+                    num_beams=num_beams,
+                    early_stopping=True,
+                    decoder_start_token_id=decoder_start_token_id,
+                )
+            elif method == "sample":
+                prediction_ids = self.generate(
+                    input_ids,
+                    max_length=max_seq_length,
+                    do_sample=True,
+                    top_k=0,
+                    decoder_start_token_id=decoder_start_token_id,
+                )
+            elif method == "top_k":
+                prediction_ids = self.generate(
+                    input_ids,
+                    max_length=max_seq_length,
+                    do_sample=True,
+                    top_k=50,
+                    decoder_start_token_id=decoder_start_token_id,
+                )
+            else:
+                raise ValueError
+
+        return prediction_ids

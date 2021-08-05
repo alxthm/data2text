@@ -16,6 +16,7 @@ from transformers import (
 from accelerate import Accelerator
 
 from src.data.datasets import Seq2seqDataset
+from src.data.formatting import add_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
 from src.utils import MyLogger, Mode
@@ -33,9 +34,11 @@ class Seq2seqTrainer:
         train_dataset: Seq2seqDataset,
         accelerator: Accelerator,
         learning_rate: float,
+        lr_scheduler: str,
         batch_size: int,
         num_epochs: int,
         noise_fn: List[str],
+        generate_method: str,
         tensorboard_writer: SummaryWriter,
         log_path: Path,
         log_every_n_steps: int,
@@ -68,7 +71,7 @@ class Seq2seqTrainer:
             self.num_training_steps = num_epochs * len(self.train_dataloader)
         self.num_epochs = num_epochs
         self.lr_scheduler = get_scheduler(
-            "linear",
+            name=lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=0,
             num_training_steps=self.num_training_steps,
@@ -77,6 +80,7 @@ class Seq2seqTrainer:
         self.max_seq_length = train_dataset.max_seq_length
         self.max_grad_norm = max_grad_norm
         self.noise_functions = noise_fn
+        self.generate_method = generate_method
 
         # logging
         self.log_path = log_path
@@ -93,9 +97,12 @@ class Seq2seqTrainer:
 
     def predict(self, input_ids: torch.Tensor, target: str):
         model = self.accelerator.unwrap_model(self.ddp_model)
-        # todo: try sampling instead of greedy ? better results?
-        prediction_ids = model.generate_with_prefix(
-            input_ids, target, self.max_seq_length
+        prediction_ids = model.generate_with_target(
+            input_ids=input_ids,
+            target=target,
+            tokenizer=self.tokenizer,
+            max_seq_length=self.max_seq_length,
+            method=self.generate_method,
         )
         # multi-GPU: no need to gather predictions across processes yet, since the
         # predictions are to be used in training (gathering is down after the loss is computed)
@@ -110,14 +117,25 @@ class Seq2seqTrainer:
             input_ids: input sequence (text/graph tokenized batch, already on device)
             label_ids: label (ground truth graph/text as a tokenized sequence)
             target: 'text' or 'graph', depending on the format of label sequences. Will
-                determine the prefix to add to decoder inputs
+                determine the prefix to add to input_ids, or the token to specify to the decoder
 
         Returns:
             loss
 
         """
-
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        if model.specify_target_with_prefix:
+            # add the prefix "generate graph/text" to the input
+            # (if model.specify_target_with_prefix=False, the model handles this itself
+            # and uses the right decoder_start_token_id in the forward)
+            input_ids = add_prefix(
+                input_ids=input_ids,
+                target=target,
+                tokenizer=self.tokenizer,
+                max_seq_len=self.max_seq_length,
+            )
         att_mask_input = self.get_att_mask(input_ids)
+
         self.ddp_model.train()
         outputs = self.ddp_model(
             input_ids=input_ids,
@@ -149,6 +167,7 @@ class Seq2seqTrainer:
                 graph_ids = batch["graph_ids"]
                 att_mask_text = batch["att_mask_text"]
                 att_mask_graph = batch["att_mask_graph"]
+                # simply make sure our get_att_mask method works
                 assert (att_mask_graph == self.get_att_mask(graph_ids)).all()
                 assert (att_mask_text == self.get_att_mask(text_ids)).all()
 

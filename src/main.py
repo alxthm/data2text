@@ -76,7 +76,9 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model
-    model = GT8.from_pretrained(conf.model)
+    model = GT8.from_pretrained(
+        conf.model, specify_target_with_prefix=conf.specify_target_with_prefix
+    )
     model.config.text_decoder_start_token_id = tokenizer.convert_tokens_to_ids(
         GENERATE_TEXT_TOKEN
     )
@@ -94,9 +96,11 @@ def main(timestamp: str):
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         accelerator=accelerator,
-        learning_rate=conf.lr,
+        learning_rate=conf.lr * conf.num_processes,
+        lr_scheduler=conf.lr_scheduler,
         batch_size=conf.batch_size_train,
         noise_fn=conf.sample_noise_fun,
+        generate_method=conf.generate_method,
         num_epochs=conf.epochs,
         tensorboard_writer=tb_writer,
         log_path=project_dir / f"models/{run_name}",
