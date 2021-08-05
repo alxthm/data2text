@@ -4,6 +4,7 @@ mlflow:
 
 seed: 0
 model: "t5-base"
+specify_target_with_prefix: False  # specify target either as a prefix to the encoder input, or with the decoder_start_token_id
 fast_dev_run: False
 
 # training
