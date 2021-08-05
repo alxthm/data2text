@@ -1,26 +1,31 @@
-from logging import warning
-from transformers.utils import logging
+import copy
+import warnings
 
-logger = logging.get_logger(__name__)
 import torch
 from torch import nn
+from torch.nn import CrossEntropyLoss
 from transformers import T5PreTrainedModel
 from transformers.modeling_outputs import (
     BaseModelOutput,
     Seq2SeqLMOutput,
 )
 from transformers.models.t5.modeling_t5 import T5Stack
-from torch.nn import CrossEntropyLoss
-import copy
-from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+from transformers.utils import logging
+from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
+
+logger = logging.get_logger(__name__)
+# Warning message for FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
+_HEAD_MASK_WARNING_MSG = """
+The input argument `head_mask` was split into two arguments `head_mask` and `decoder_head_mask`. Currently,
+`decoder_head_mask` is set to copy `head_mask`, but this feature is deprecated and will be removed in future versions.
+If you do not want to use any `decoder_head_mask` now, please set `decoder_head_mask = torch.ones(num_layers,
+num_heads)`.
+"""
 
 
-class T5Custom(T5PreTrainedModel):
-    authorized_missing_keys = [
-        r"encoder\.embed_tokens\.weight",
-        r"decoder\.embed_tokens\.weight",
-        r"lm_head\.weight",
-    ]
+class GT8(T5PreTrainedModel):
+    # Based on T5ForConditionalGeneration, from transformers 4.9.1
+    # https://huggingface.co/transformers/_modules/transformers/models/t5/modeling_t5.html#T5ForConditionalGeneration
     _keys_to_ignore_on_load_missing = [
         r"encoder\.embed_tokens\.weight",
         r"decoder\.embed_tokens\.weight",
@@ -37,6 +42,7 @@ class T5Custom(T5PreTrainedModel):
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
 
         encoder_config = copy.deepcopy(config)
+        encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
         self.encoder = T5Stack(encoder_config, self.shared)
@@ -51,6 +57,32 @@ class T5Custom(T5PreTrainedModel):
 
         self.init_weights()
 
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+
+    def parallelize(self, device_map=None):
+        self.device_map = (
+            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
+            if device_map is None
+            else device_map
+        )
+        assert_device_map(self.device_map, len(self.encoder.block))
+        self.encoder.parallelize(self.device_map)
+        self.decoder.parallelize(self.device_map)
+        self.lm_head = self.lm_head.to(self.decoder.first_device)
+        self.model_parallel = True
+
+    def deparallelize(self):
+        self.encoder.deparallelize()
+        self.decoder.deparallelize()
+        self.encoder = self.encoder.to("cpu")
+        self.decoder = self.decoder.to("cpu")
+        self.lm_head = self.lm_head.to("cpu")
+        self.model_parallel = False
+        self.device_map = None
+        torch.cuda.empty_cache()
+
     def get_input_embeddings(self):
         return self.shared
 
@@ -58,6 +90,9 @@ class T5Custom(T5PreTrainedModel):
         self.shared = new_embeddings
         self.encoder.set_input_embeddings(new_embeddings)
         self.decoder.set_input_embeddings(new_embeddings)
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
 
     def get_output_embeddings(self):
         return self.lm_head
@@ -68,48 +103,17 @@ class T5Custom(T5PreTrainedModel):
     def get_decoder(self):
         return self.decoder
 
-    def _shift_right(self, input_ids, target):
-        # assert (
-        #    decoder_start_token_id is not None
-        # ), "self.model.config.decoder_start_token_id has to be defined. In T5 it is usually set to the pad_token_id. See T5 docs for more information"
-
-        if target == "text":
-            decoder_start_token_id = self.config.text_decoder_start_token_id
-        elif target == "graph":
-            decoder_start_token_id = self.config.graph_decoder_start_token_id
-        else:
-            raise ValueError(
-                f"Target should be specified to generate text or graph start token id"
-            )
-
-        pad_token_id = self.config.pad_token_id
-
-        # shift inputs to the right
-        shifted_input_ids = input_ids.new_zeros(input_ids.shape)
-        shifted_input_ids[..., 1:] = input_ids[..., :-1].clone()
-        shifted_input_ids[..., 0] = decoder_start_token_id
-
-        assert (
-            pad_token_id is not None
-        ), "self.model.config.pad_token_id has to be defined."
-        # replace possible -100 values in labels by `pad_token_id`
-        shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
-
-        assert torch.all(
-            shifted_input_ids >= 0
-        ).item(), "Verify that `shifted_input_ids` has only positive values"
-
-        return shifted_input_ids
-
     def forward(
         self,
         input_ids=None,
         attention_mask=None,
         decoder_input_ids=None,
         decoder_attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
         encoder_outputs=None,
         past_key_values=None,
-        head_mask=None,
         inputs_embeds=None,
         decoder_inputs_embeds=None,
         labels=None,
@@ -118,15 +122,12 @@ class T5Custom(T5PreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
         target=None,
-        **kwargs,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
             Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[-100, 0, ...,
             config.vocab_size - 1]`. All labels set to ``-100`` are ignored (masked), the loss is only computed for
             labels in ``[0, ..., config.vocab_size]``
-        kwargs (:obj:`Dict[str, any]`, optional, defaults to `{}`):
-            Used to hide legacy arguments that have been deprecated.
 
         Returns:
 
@@ -135,7 +136,7 @@ class T5Custom(T5PreTrainedModel):
             >>> from transformers import T5Tokenizer, T5ForConditionalGeneration
 
             >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
-            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small', return_dict=True)
+            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small')
 
             >>> input_ids = tokenizer('The <extra_id_0> walks in <extra_id_1> park', return_tensors='pt').input_ids
             >>> labels = tokenizer('<extra_id_0> cute dog <extra_id_1> the <extra_id_2> </s>', return_tensors='pt').input_ids
@@ -146,31 +147,16 @@ class T5Custom(T5PreTrainedModel):
             >>> input_ids = tokenizer("summarize: studies have shown that owning a dog is good for you ", return_tensors="pt").input_ids  # Batch size 1
             >>> outputs = model.generate(input_ids)
         """
-
-        if "lm_labels" in kwargs:
-            warning.warn(
-                "The `lm_labels` argument is deprecated and will be removed in a future version, use `labels` instead.",
-                FutureWarning,
-            )
-            labels = kwargs.pop("lm_labels")
-        if "decoder_past_key_value_states" in kwargs:
-            warnings.warn(
-                "The `decoder_past_key_value_states` argument is deprecated and will be removed in a future version, use `past_key_values` instead.",
-                FutureWarning,
-            )
-            past_key_values = kwargs.pop("decoder_past_key_value_states")
-        if "decoder_past_key_values" in kwargs:
-            warnings.warn(
-                "The `decoder_past_key_values` argument is deprecated and will be removed in a future version, use `past_key_values` instead.",
-                FutureWarning,
-            )
-            past_key_values = kwargs.pop("decoder_past_key_values")
-        assert kwargs == {}, f"Unexpected keyword arguments: {list(kwargs.keys())}."
-
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+
+        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
+        if head_mask is not None and decoder_head_mask is None:
+            if self.config.num_layers == self.config.num_decoder_layers:
+                warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
+                decoder_head_mask = head_mask
 
         # Encode if needed (training, first prediction pass)
         if encoder_outputs is None:
@@ -193,6 +179,9 @@ class T5Custom(T5PreTrainedModel):
 
         hidden_states = encoder_outputs[0]
 
+        if self.model_parallel:
+            torch.cuda.set_device(self.decoder.first_device)
+
         if (
             labels is not None
             and decoder_input_ids is None
@@ -212,6 +201,19 @@ class T5Custom(T5PreTrainedModel):
             if decoder_inputs_embeds is not None:
                 decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
 
+        # Set device for model parallelism
+        if self.model_parallel:
+            torch.cuda.set_device(self.decoder.first_device)
+            hidden_states = hidden_states.to(self.decoder.first_device)
+            if decoder_input_ids is not None:
+                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(self.decoder.first_device)
+            if decoder_attention_mask is not None:
+                decoder_attention_mask = decoder_attention_mask.to(
+                    self.decoder.first_device
+                )
+
         # Decode
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
@@ -220,7 +222,8 @@ class T5Custom(T5PreTrainedModel):
             past_key_values=past_key_values,
             encoder_hidden_states=hidden_states,
             encoder_attention_mask=attention_mask,
-            head_mask=head_mask,
+            head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -228,9 +231,18 @@ class T5Custom(T5PreTrainedModel):
         )
 
         sequence_output = decoder_outputs[0]
-        # Rescale output before projecting on vocab
-        # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-        sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+        # Set device for model parallelism
+        if self.model_parallel:
+            torch.cuda.set_device(self.encoder.first_device)
+            self.lm_head = self.lm_head.to(self.encoder.first_device)
+            sequence_output = sequence_output.to(self.lm_head.weight.device)
+
+        if self.config.tie_word_embeddings:
+            # Rescale output before projecting on vocab
+            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+            sequence_output = sequence_output * (self.model_dim ** -0.5)
+
         lm_logits = self.lm_head(sequence_output)
 
         loss = None
@@ -255,38 +267,14 @@ class T5Custom(T5PreTrainedModel):
             encoder_attentions=encoder_outputs.attentions,
         )
 
-    def generate_with_prefix(
-        self,
-        input_ids: torch.Tensor,
-        target: str,
-        max_seq_length: int,
-    ):
-
-        if target == "text":
-            decoder_start_token_id = self.config.text_decoder_start_token_id
-        elif target == "graph":
-            decoder_start_token_id = self.config.graph_decoder_start_token_id
-        else:
-            raise ValueError(
-                f"Target should be specified to generate text or graph start token id"
-            )
-
-        self.eval()
-        with torch.no_grad():
-            prediction_ids = self.generate(
-                input_ids,
-                max_length=max_seq_length,
-                decoder_start_token_id=decoder_start_token_id,
-                num_beams=1,
-            )
-
-        return prediction_ids
-
     def prepare_inputs_for_generation(
         self,
         input_ids,
         past=None,
         attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
         use_cache=None,
         encoder_outputs=None,
         **kwargs,
@@ -301,8 +289,15 @@ class T5Custom(T5PreTrainedModel):
             "past_key_values": past,
             "encoder_outputs": encoder_outputs,
             "attention_mask": attention_mask,
+            "head_mask": head_mask,
+            "decoder_head_mask": decoder_head_mask,
+            "cross_attn_head_mask": cross_attn_head_mask,
             "use_cache": use_cache,
         }
+
+    def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor, target: str):
+        # in principle, this method should not be called
+        return self._shift_right(labels, target)
 
     def _reorder_cache(self, past, beam_idx):
         # if decoder past is not included in output
@@ -321,7 +316,9 @@ class T5Custom(T5PreTrainedModel):
             for layer_past_state in layer_past_states:
                 # need to set correct `past` for each of the four key / value states
                 reordered_layer_past_states = reordered_layer_past_states + (
-                    layer_past_state.index_select(0, beam_idx),
+                    layer_past_state.index_select(
+                        0, beam_idx.to(layer_past_state.device)
+                    ),
                 )
 
             assert reordered_layer_past_states[0].shape == layer_past_states[0].shape
@@ -331,3 +328,51 @@ class T5Custom(T5PreTrainedModel):
                 reordered_layer_past_states,
             )
         return reordered_decoder_past
+
+    def _shift_right(self, input_ids, target):
+        """
+        Override the _shift_right method of T5PreTrainedModel, to add a
+        custom token at the beginning of input_ids.
+        Instead of the default decoder_start_token_id (configured to pad_token_id for T5
+        by default), use either a text_decoder_start_token_id or a graph_decoder_start_token_id
+        depending on the desired target (graph or text generation).
+
+        This is used during the forward, in training mode, to shift the labels and obtain decoder inputs
+        During eval, we are using the base generate method, which takes care of using
+        the right decoder_input_ids with the appropriate decoder_start_token_id argument.
+
+        Args:
+            input_ids:
+            target: 'text' or 'graph'
+
+        Returns:
+
+        """
+        if target == "text":
+            decoder_start_token_id = self.config.text_decoder_start_token_id
+        elif target == "graph":
+            decoder_start_token_id = self.config.graph_decoder_start_token_id
+        else:
+            raise ValueError(f"Target should be specified to generate text or graph")
+        assert (
+            decoder_start_token_id is not None
+        ), f"decoder_start_token_id (for target={target}) has not been defined)"
+
+        pad_token_id = self.config.pad_token_id
+
+        # shift inputs to the right
+        shifted_input_ids = input_ids.new_zeros(input_ids.shape)
+        shifted_input_ids[..., 1:] = input_ids[..., :-1].clone()
+        shifted_input_ids[..., 0] = decoder_start_token_id
+
+        assert (
+            pad_token_id is not None
+        ), "self.model.config.pad_token_id has to be defined."
+        # replace possible -100 values in labels by `pad_token_id`
+        shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
+
+        assert torch.all(
+            shifted_input_ids >= 0
+        ).item(), "Verify that `shifted_input_ids` has only positive values"
+
+        return shifted_input_ids
