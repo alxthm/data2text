@@ -4,6 +4,9 @@ import torch
 from dataclasses import dataclass
 from transformers import PreTrainedTokenizer
 
+GENERATE_TEXT_TOKEN = "[GENERATE_TEXT]"
+GENERATE_GRAPH_TOKEN = "[GENERATE_GRAPH]"
+
 
 @dataclass
 class Entity:

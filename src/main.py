@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
 from src.data.datasets import WebNLG2020
-from src.data.formatting import GraphFormat
+from src.data.formatting import GraphFormat, GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN
 from src.eval.evaluator import EvaluatorWebNLG
 from src.trainer import Seq2seqTrainer
 from src.model import GT8
@@ -60,8 +60,8 @@ def main(timestamp: str):
             GraphFormat.TYPE_TOKEN,
             GraphFormat.TAIL_TOKEN,
             GraphFormat.BLANK_TOKEN,
-            "[GENERATE TEXT]",
-            "[GENERATE GRAPH]",
+            GENERATE_TEXT_TOKEN,
+            GENERATE_GRAPH_TOKEN,
         ]
     )
 
@@ -77,10 +77,13 @@ def main(timestamp: str):
 
     # prepare model
     model = GT8.from_pretrained(conf.model)
-    model.config.text_decoder_start_token_id = tokenizer.encode("[GENERATE TEXT]")[0]
-    model.config.graph_decoder_start_token_id = tokenizer.encode("[GENERATE GRAPH]")[0]
-
-    # extend embedding matrices to include our separator tokens
+    model.config.text_decoder_start_token_id = tokenizer.convert_tokens_to_ids(
+        GENERATE_TEXT_TOKEN
+    )
+    model.config.graph_decoder_start_token_id = tokenizer.convert_tokens_to_ids(
+        GENERATE_GRAPH_TOKEN
+    )
+    # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")
     logging.info(f"\n{summary}")
