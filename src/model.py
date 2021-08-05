@@ -37,7 +37,13 @@ class GT8(T5PreTrainedModel):
         r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
     ]
 
-    def __init__(self, config, specify_target_with_prefix: bool):
+    def __init__(
+        self,
+        config,
+        specify_target_with_prefix: bool,
+        generate_text_token_id: int,
+        generate_graph_token_id: int,
+    ):
         super().__init__(config)
         self.model_dim = config.d_model
 
@@ -64,6 +70,9 @@ class GT8(T5PreTrainedModel):
         self.device_map = None
 
         self.specify_target_with_prefix = specify_target_with_prefix
+        if specify_target_with_prefix:
+            self.generate_text_token_id = generate_text_token_id
+            self.generate_graph_token_id = generate_graph_token_id
 
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -353,9 +362,9 @@ class GT8(T5PreTrainedModel):
 
         """
         if target == "text":
-            decoder_start_token_id = self.config.text_decoder_start_token_id
+            decoder_start_token_id = self.generate_text_token_id
         elif target == "graph":
-            decoder_start_token_id = self.config.graph_decoder_start_token_id
+            decoder_start_token_id = self.generate_graph_token_id
         else:
             raise ValueError(f"Target should be specified to generate text or graph")
         assert (
@@ -415,9 +424,9 @@ class GT8(T5PreTrainedModel):
         else:
             # don't touch the encoder_input_ids, but tell the decoder the target format
             if target == "text":
-                decoder_start_token_id = self.config.text_decoder_start_token_id
+                decoder_start_token_id = self.generate_text_token_id
             elif target == "graph":
-                decoder_start_token_id = self.config.graph_decoder_start_token_id
+                decoder_start_token_id = self.generate_graph_token_id
             else:
                 raise ValueError
 
