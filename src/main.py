@@ -10,10 +10,10 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
 from src.data.datasets import WebNLG2020
-from src.data.formatting import GraphFormat
+from src.data.formatting import GraphFormat, GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN
 from src.eval.evaluator import EvaluatorWebNLG
 from src.trainer import Seq2seqTrainer
-from src.model import T5Custom
+from src.model import GT8
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -54,14 +54,16 @@ def main(timestamp: str):
     tokenizer = AutoTokenizer.from_pretrained(conf.model)
     # add our separators as new tokens
     # (regular, not special tokens like <pad> since we need them after cleaning output sentence)
-    tokenizer.add_tokens(
-        [
-            GraphFormat.HEAD_TOKEN,
-            GraphFormat.TYPE_TOKEN,
-            GraphFormat.TAIL_TOKEN,
-            GraphFormat.BLANK_TOKEN,
-        ]
-    )
+    new_tokens = [
+        GraphFormat.HEAD_TOKEN,
+        GraphFormat.TYPE_TOKEN,
+        GraphFormat.TAIL_TOKEN,
+        GraphFormat.BLANK_TOKEN,
+    ]
+    if not conf.specify_target_with_prefix:
+        # to be used as a start_token in decoder inputs
+        new_tokens += [GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN]
+    tokenizer.add_tokens(new_tokens)
 
     # load data
     data_dir = project_dir / "data"
@@ -74,8 +76,13 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model
-    model = T5Custom.from_pretrained(conf.model)
-    # extend embedding matrices to include our separator tokens
+    model = GT8.from_pretrained(
+        conf.model,
+        specify_target_with_prefix=conf.specify_target_with_prefix,
+        generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
+        generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+    )
+    # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")
     logging.info(f"\n{summary}")

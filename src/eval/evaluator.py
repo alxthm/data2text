@@ -168,7 +168,7 @@ class EvaluatorWebNLG:
     def make_pred_g2t_batch(self, batch, dataset: WebNLG2020):
         # get raw batch predictions
         model = self.accelerator.unwrap_model(self.ddp_model)
-        text_predictions_ids = model.generate_with_prefix(
+        text_predictions_ids = model.generate_with_target(
             batch["graph_ids"].to(self.accelerator.device),
             target="text",
             tokenizer=self.tokenizer,
@@ -232,7 +232,7 @@ class EvaluatorWebNLG:
         # get raw batch predictions
         # shape: (N, max_seq_len), with max_seq_len depending on the batch (dynamically padded)
         model = self.accelerator.unwrap_model(self.ddp_model)
-        graph_prediction_ids = model.generate_with_prefix(
+        graph_prediction_ids = model.generate_with_target(
             batch["text_ids"].to(self.accelerator.device),
             target="graph",
             tokenizer=self.tokenizer,

@@ -97,8 +97,12 @@ class Seq2seqTrainer:
 
     def predict(self, input_ids: torch.Tensor, target: str):
         model = self.accelerator.unwrap_model(self.ddp_model)
-        prediction_ids = model.generate_with_prefix(
-            input_ids, target, self.tokenizer, self.max_seq_length, self.generate_method
+        prediction_ids = model.generate_with_target(
+            input_ids=input_ids,
+            target=target,
+            tokenizer=self.tokenizer,
+            max_seq_length=self.max_seq_length,
+            method=self.generate_method,
         )
         # multi-GPU: no need to gather predictions across processes yet, since the
         # predictions are to be used in training (gathering is down after the loss is computed)
@@ -110,27 +114,34 @@ class Seq2seqTrainer:
         """
 
         Args:
-            input_ids: input sequence (text/graph tokenized batch, already on device, with prefix)
+            input_ids: input sequence (text/graph tokenized batch, already on device)
             label_ids: label (ground truth graph/text as a tokenized sequence)
             target: 'text' or 'graph', depending on the format of label sequences. Will
-                determine the prefix to add to input_ids
+                determine the prefix to add to input_ids, or the token to specify to the decoder
 
         Returns:
             loss
 
         """
-        input_ids = add_prefix(
-            input_ids=input_ids,
-            target=target,
-            tokenizer=self.tokenizer,
-            max_seq_len=self.max_seq_length,
-        )
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        if model.specify_target_with_prefix:
+            # add the prefix "generate graph/text" to the input
+            # (if model.specify_target_with_prefix=False, the model handles this itself
+            # and uses the right decoder_start_token_id in the forward)
+            input_ids = add_prefix(
+                input_ids=input_ids,
+                target=target,
+                tokenizer=self.tokenizer,
+                max_seq_len=self.max_seq_length,
+            )
         att_mask_input = self.get_att_mask(input_ids)
+
         self.ddp_model.train()
         outputs = self.ddp_model(
             input_ids=input_ids,
             attention_mask=att_mask_input,
             labels=label_ids,
+            target=target,
         )
         loss = outputs.loss
         self.accelerator.backward(loss)
@@ -156,6 +167,7 @@ class Seq2seqTrainer:
                 graph_ids = batch["graph_ids"]
                 att_mask_text = batch["att_mask_text"]
                 att_mask_graph = batch["att_mask_graph"]
+                # simply make sure our get_att_mask method works
                 assert (att_mask_graph == self.get_att_mask(graph_ids)).all()
                 assert (att_mask_text == self.get_att_mask(text_ids)).all()
 

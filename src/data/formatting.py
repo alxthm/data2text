@@ -4,6 +4,9 @@ import torch
 from dataclasses import dataclass
 from transformers import PreTrainedTokenizer
 
+GENERATE_TEXT_TOKEN = "[GENERATE_TEXT]"
+GENERATE_GRAPH_TOKEN = "[GENERATE_GRAPH]"
+
 
 @dataclass
 class Entity:
@@ -179,4 +182,3 @@ def add_prefix(
     )
     batch_encoding = batch_encoding.to(input_ids.device)
     return batch_encoding.input_ids
-
