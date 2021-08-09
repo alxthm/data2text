@@ -3,6 +3,7 @@ import warnings
 
 import torch
 from torch import nn
+from torch.distributions import Normal
 from torch.nn import CrossEntropyLoss
 from transformers import T5PreTrainedModel, PreTrainedTokenizer
 from transformers.modeling_outputs import (
@@ -345,7 +346,8 @@ class GT8(T5PreTrainedModel):
     def _shift_right(self, input_ids, target):
         """
         Override the _shift_right method of T5PreTrainedModel, to add a
-        custom token at the beginning of input_ids.
+        custom token at the beginning of input_ids, (if self.specify_target_with_prefix).
+
         Instead of the default decoder_start_token_id (configured to pad_token_id for T5
         by default), use either a text_decoder_start_token_id or a graph_decoder_start_token_id
         depending on the desired target (graph or text generation).
@@ -361,26 +363,29 @@ class GT8(T5PreTrainedModel):
         Returns:
 
         """
-        if target == "text":
+        pad_token_id = self.config.pad_token_id
+        assert (
+            pad_token_id is not None
+        ), "self.model.config.pad_token_id has to be defined."
+
+        if self.specify_target_with_prefix:
+            # target is already specified as a prefix in the input sequence
+            decoder_start_token_id = pad_token_id
+        elif target == "text":
             decoder_start_token_id = self.generate_text_token_id
         elif target == "graph":
             decoder_start_token_id = self.generate_graph_token_id
         else:
-            raise ValueError(f"Target should be specified to generate text or graph")
+            raise ValueError(f"Target (text/graph) should be specified")
         assert (
             decoder_start_token_id is not None
         ), f"decoder_start_token_id (for target={target}) has not been defined)"
-
-        pad_token_id = self.config.pad_token_id
 
         # shift inputs to the right
         shifted_input_ids = input_ids.new_zeros(input_ids.shape)
         shifted_input_ids[..., 1:] = input_ids[..., :-1].clone()
         shifted_input_ids[..., 0] = decoder_start_token_id
 
-        assert (
-            pad_token_id is not None
-        ), "self.model.config.pad_token_id has to be defined."
         # replace possible -100 values in labels by `pad_token_id`
         shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
 

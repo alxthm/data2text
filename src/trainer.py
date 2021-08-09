@@ -136,6 +136,8 @@ class Seq2seqTrainer:
             )
         att_mask_input = self.get_att_mask(input_ids)
 
+        # todo: check if we need to set pad token ids to -100 in the labels,
+        #  to ignore them when computing the loss
         self.ddp_model.train()
         outputs = self.ddp_model(
             input_ids=input_ids,
