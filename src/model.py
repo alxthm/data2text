@@ -134,7 +134,7 @@ class GT8(T5PreTrainedModel):
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
-        return_dict=None,
+        return_dict=True,
         target=None,
     ):
         r"""
@@ -162,9 +162,9 @@ class GT8(T5PreTrainedModel):
             >>> outputs = model.generate(input_ids)
         """
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
+        # -> just make sure this is never overridden to False
+        assert return_dict
 
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
@@ -184,14 +184,9 @@ class GT8(T5PreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
-            )
 
-        hidden_states = encoder_outputs[0]
+        # to be fed to the decoder
+        hidden_states = encoder_outputs.last_hidden_state
 
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
@@ -244,7 +239,7 @@ class GT8(T5PreTrainedModel):
             return_dict=return_dict,
         )
 
-        sequence_output = decoder_outputs[0]
+        sequence_output = decoder_outputs.last_hidden_state
 
         # Set device for model parallelism
         if self.model_parallel:
@@ -263,11 +258,6 @@ class GT8(T5PreTrainedModel):
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
-            # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
-
-        if not return_dict:
-            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
-            return ((loss,) + output) if loss is not None else output
 
         return Seq2SeqLMOutput(
             loss=loss,
