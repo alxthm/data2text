@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 
 import torch
 from dataclasses import dataclass
@@ -52,7 +52,7 @@ class VariationalT5EncoderOutput(ModelOutput):
 
 
 @dataclass
-class GT8ModelOutput:
+class GT8ModelOutput(ModelOutput):
     """
     Same attributes as the BaseModelOutputWithPastAndCrossAttentions class (output of the regular
     encoder, T5Stack)
@@ -86,10 +86,10 @@ class VariationalT5Encoder(T5PreTrainedModel):
         self.mu_z = nn.Linear(model_dim, model_dim)
         self.log_sigma_z = nn.Linear(model_dim, model_dim)
 
-    def forward(self, **kwargs):
+    def forward(self, *args, **kwargs):
         # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
         assert kwargs["return_dict"]
-        encoder_outputs = self.t5_encoder(**kwargs)
+        encoder_outputs = self.t5_encoder(*args, **kwargs)
         mu_z = self.mu_z(encoder_outputs.last_hidden_state)
         log_sigma_z = self.log_sigma_z(encoder_outputs.last_hidden_state)
 
@@ -520,6 +520,63 @@ class GT8(T5PreTrainedModel):
         ).item(), "Verify that `shifted_input_ids` has only positive values"
 
         return shifted_input_ids
+
+    @staticmethod
+    def _expand_inputs_for_generation(
+        input_ids: torch.LongTensor,
+        expand_size: int = 1,
+        is_encoder_decoder: bool = False,
+        attention_mask: torch.LongTensor = None,
+        encoder_outputs: VariationalT5EncoderOutput = None,
+        **model_kwargs,
+    ) -> Tuple[torch.LongTensor, Dict[str, Any]]:
+        """
+        Expand tensors across the batch dimension, e.g. to have num_beams*batch_size
+        instead of batch_size, during beam search generation
+
+        We redefine this function to also expand vae_mu_z/vae_sigma_z (in encoder_outputs).
+        """
+        expanded_return_idx = (
+            torch.arange(input_ids.shape[0])
+            .view(-1, 1)
+            .repeat(1, expand_size)
+            .view(-1)
+            .to(input_ids.device)
+        )
+        input_ids = input_ids.index_select(0, expanded_return_idx)
+
+        if "token_type_ids" in model_kwargs:
+            token_type_ids = model_kwargs["token_type_ids"]
+            model_kwargs["token_type_ids"] = token_type_ids.index_select(
+                0, expanded_return_idx
+            )
+
+        if attention_mask is not None:
+            model_kwargs["attention_mask"] = attention_mask.index_select(
+                0, expanded_return_idx
+            )
+
+        if is_encoder_decoder:
+            assert encoder_outputs is not None
+            last_hidden_states = encoder_outputs.last_hidden_state.index_select(
+                0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device)
+            )
+            encoder_outputs["last_hidden_state"] = last_hidden_states
+
+            if "mu_z" in encoder_outputs:
+                # if we have a VAE model
+                mu_z = encoder_outputs.mu_z.index_select(
+                    0, expanded_return_idx.to(encoder_outputs.mu_z.device)
+                )
+                log_sigma_z = encoder_outputs.log_sigma_z.index_select(
+                    0, expanded_return_idx.to(encoder_outputs.log_sigma_z.device)
+                )
+                encoder_outputs["mu_z"] = mu_z
+                encoder_outputs["log_sigma_z"] = log_sigma_z
+
+            model_kwargs["encoder_outputs"] = encoder_outputs
+
+        return input_ids, model_kwargs
 
     def generate_with_target(
         self,
