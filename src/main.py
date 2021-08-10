@@ -83,6 +83,7 @@ def main(timestamp: str):
     # prepare model
     model = GT8.from_pretrained(
         conf.model,
+        use_vae=conf.use_vae,
         specify_target_with_prefix=conf.specify_target_with_prefix,
         generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
         generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
