@@ -337,7 +337,7 @@ class Seq2seqTrainer:
         }
         for m in ["t2g", "g2t", "auto", "cycle"]:
             # for each mode, log our regular and vae metrics
-            if f"{m}_outputs" in kwargs:
+            if kwargs.get(f"{m}_outputs", None) is not None:
                 outputs = kwargs[f"{m}_outputs"]
                 metrics[f"train/loss_{m}"] = outputs.loss.item()
                 if "kl_div" in outputs:

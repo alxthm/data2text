@@ -322,10 +322,8 @@ class GT8(T5PreTrainedModel):
             recon_loss = loss_fct(
                 lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1)
             )
-            loss = recon_loss
 
             if self.use_vae:
-                # add the KL divergence term
                 prior = Normal(
                     loc=torch.zeros_like(encoder_outputs.mu_z),
                     scale=torch.ones_like(encoder_outputs.mu_z),
@@ -336,7 +334,9 @@ class GT8(T5PreTrainedModel):
                 #   - taking the mean over batch and sequence dim, to match the
                 #       CrossEntropyLoss (which takes mean over N and T as well)
                 kl_div = kl_div.sum(dim=2).mean()
-                loss -= kl_div
+                loss = recon_loss - kl_div
+            else:
+                loss = recon_loss
 
         return GT8ModelOutput(
             loss=loss,

@@ -40,7 +40,7 @@ def main(timestamp: str):
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
-    conf.use_vae = conf.mode == "both_unsup" and conf.loss.cycle == "vae"
+    conf.use_vae = conf.loss.cycle == "vae"
     logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
