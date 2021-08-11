@@ -19,7 +19,7 @@ from src.data.datasets import Seq2seqDataset
 from src.data.formatting import add_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
-from src.utils import MyLogger, Mode
+from src.utils import MyLogger, Mode, AutoLoss, CycleLoss
 
 
 class Seq2seqTrainer:
@@ -30,6 +30,8 @@ class Seq2seqTrainer:
         self,
         model,
         mode: Mode,
+        cycle_loss: str,
+        auto_loss: str,
         tokenizer: PreTrainedTokenizer,
         train_dataset: Seq2seqDataset,
         accelerator: Accelerator,
@@ -46,6 +48,8 @@ class Seq2seqTrainer:
         max_training_steps: int = -1,
     ):
         self.mode = mode
+        self.cycle_loss = cycle_loss
+        self.auto_loss = auto_loss
         self.tokenizer = tokenizer
 
         # training
@@ -147,7 +151,7 @@ class Seq2seqTrainer:
         )
         loss = outputs.loss
         self.accelerator.backward(loss)
-        return loss, outputs.logits
+        return outputs
 
     def train(self):
         global_step = 0
@@ -174,10 +178,10 @@ class Seq2seqTrainer:
                 assert (att_mask_text == self.get_att_mask(text_ids)).all()
 
                 # training step
-                loss_g2t = torch.tensor(0)
-                loss_t2g = torch.tensor(0)
-                loss_text = torch.tensor(0)
-                loss_graph = torch.tensor(0)
+                t2g_outputs = None
+                g2t_outputs = None
+                text_outputs = None
+                graph_outputs = None
                 syn_text_ids = None  # synthetic text and graphs
                 syn_graph_ids = None
                 t2g_logits = None
@@ -185,18 +189,18 @@ class Seq2seqTrainer:
                 noisy_text_ids = None
                 noisy_graph_ids = None
                 if self.mode == Mode.t2g:
-                    loss_t2g, t2g_logits = self.teach_model_one_step(
+                    t2g_outputs = self.teach_model_one_step(
                         input_ids=text_ids, label_ids=graph_ids, target="graph"
                     )
                 elif self.mode == Mode.g2t:
-                    loss_g2t, g2t_logits = self.teach_model_one_step(
+                    g2t_outputs = self.teach_model_one_step(
                         input_ids=graph_ids, label_ids=text_ids, target="text"
                     )
                 elif self.mode == Mode.both_sup:
-                    loss_g2t, g2t_logits = self.teach_model_one_step(
+                    g2t_outputs = self.teach_model_one_step(
                         input_ids=graph_ids, label_ids=text_ids, target="text"
                     )
-                    loss_t2g, t2g_logits = self.teach_model_one_step(
+                    t2g_outputs = self.teach_model_one_step(
                         input_ids=text_ids, label_ids=graph_ids, target="graph"
                     )
                 elif self.mode == Mode.both_unsup:
@@ -207,26 +211,47 @@ class Seq2seqTrainer:
                     # todo: samples will be correlated with denoising autoencoding+backtranslation
                     #   -> do one epoch of each like GT-BT?
                     #   -> or see what Lample does?
-                    # text denoising auto-encoder step
-                    noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
-                    loss_text, _ = self.teach_model_one_step(
-                        input_ids=noisy_text_ids, label_ids=text_ids, target="text"
-                    )
-                    # graph denoising auto-encoder step
-                    noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=False)
-                    loss_graph, _ = self.teach_model_one_step(
-                        input_ids=noisy_graph_ids, label_ids=graph_ids, target="graph"
-                    )
-                    # g2t unsupervised step
-                    syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
-                    loss_g2t, g2t_logits = self.teach_model_one_step(
-                        input_ids=syn_graph_ids, label_ids=text_ids, target="text"
-                    )
-                    # t2g unsupervised step
-                    syn_text_ids = self.predict(input_ids=graph_ids, target="text")
-                    loss_t2g, t2g_logits = self.teach_model_one_step(
-                        input_ids=syn_text_ids, label_ids=graph_ids, target="graph"
-                    )
+                    if self.auto_loss == AutoLoss.denoising:
+                        # text denoising auto-encoder step
+                        noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
+                        text_outputs = self.teach_model_one_step(
+                            input_ids=noisy_text_ids, label_ids=text_ids, target="text"
+                        )
+                        # graph denoising auto-encoder step
+                        noisy_graph_ids = self.get_noisy_inputs(
+                            graph_ids, is_graph=False
+                        )
+                        graph_outputs = self.teach_model_one_step(
+                            input_ids=noisy_graph_ids,
+                            label_ids=graph_ids,
+                            target="graph",
+                        )
+                    elif self.auto_loss == AutoLoss.vae:
+                        text_outputs = self.teach_model_one_step(
+                            input_ids=text_ids, label_ids=text_ids, target="text"
+                        )
+                        graph_outputs = self.teach_model_one_step(
+                            input_ids=graph_ids, label_ids=graph_ids, target="graph"
+                        )
+                    else:
+                        raise ValueError
+
+                    if (
+                        self.cycle_loss == CycleLoss.regular
+                        or self.cycle_loss == CycleLoss.vae
+                    ):
+                        # g2t unsupervised step
+                        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
+                        g2t_outputs = self.teach_model_one_step(
+                            input_ids=syn_graph_ids, label_ids=text_ids, target="text"
+                        )
+                        # t2g unsupervised step
+                        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+                        t2g_outputs = self.teach_model_one_step(
+                            input_ids=syn_text_ids, label_ids=graph_ids, target="graph"
+                        )
+                    else:
+                        raise ValueError
                 else:
                     raise ValueError
 
@@ -238,17 +263,14 @@ class Seq2seqTrainer:
                 self.optimizer.zero_grad()
                 global_step += 1
 
-                # log training info
-                self.logger.log_metrics(
-                    {
-                        "train/loss_text": loss_text.item(),
-                        "train/loss_graph": loss_graph.item(),
-                        "train/loss_t2g": loss_t2g.item(),
-                        "train/loss_g2t": loss_g2t.item(),
-                        "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
-                        "train/epoch": epoch,
-                    },
-                    step=global_step,
+                # log training info (metrics and text sequences)
+                self.log_metrics(
+                    global_step,
+                    epoch,
+                    t2g_outputs=t2g_outputs,
+                    g2t_outputs=g2t_outputs,
+                    text_outputs=text_outputs,
+                    graph_outputs=graph_outputs,
                 )
                 self.log_training_samples(
                     global_step,
@@ -259,8 +281,8 @@ class Seq2seqTrainer:
                     syn_graph_ids=syn_graph_ids,
                     noisy_text_ids=noisy_text_ids,
                     noisy_graph_ids=noisy_graph_ids,
-                    t2g_logits=t2g_logits,
-                    g2t_logits=g2t_logits,
+                    t2g_logits=t2g_outputs.logits if t2g_outputs else None,
+                    g2t_logits=g2t_outputs.logits if g2t_outputs else None,
                 )
 
             # evaluate after each epoch (and save model checkpoint if necessary)
@@ -304,6 +326,22 @@ class Seq2seqTrainer:
         batch_encoding = batch_encoding.to(input_ids.device)
         noisy_ids = batch_encoding.input_ids
         return noisy_ids
+
+    def log_metrics(self, global_step: int, epoch: int, **kwargs):
+        metrics = {
+            "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
+            "train/epoch": epoch,
+        }
+        for m in ["t2g", "g2t", "auto", "cycle"]:
+            # for each mode, log our regular and vae metrics
+            if f"{m}_outputs" in kwargs:
+                outputs = kwargs[f"{m}_outputs"]
+                metrics[f"train/loss_{m}"] = outputs.loss.item()
+                if "kl_div" in outputs:
+                    metrics[f"train/kl_div_{m}"] = outputs.kl_div.item()
+                    metrics[f"train/recon_loss_{m}"] = outputs.recon_loss.item()
+
+        self.logger.log_metrics(metrics, step=global_step)
 
     def log_training_samples(self, global_step: int, epoch: int, **kwargs):
         if (

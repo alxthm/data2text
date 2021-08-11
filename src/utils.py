@@ -21,6 +21,17 @@ class Mode(Enum):
     g2t = "g2t"
     both_sup = "both_sup"
     both_unsup = "both_unsup"
+    both_vae = "both_vae"
+
+
+class AutoLoss(Enum):
+    vae = "vae"
+    denoising = "denoising"
+
+
+class CycleLoss(Enum):
+    vae = "vae"
+    regular = "regular"
 
 
 class WarningsFilter:

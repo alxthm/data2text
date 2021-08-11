@@ -20,6 +20,8 @@ from src.utils import (
     mlflow_log_src_and_config,
     ModelSummary,
     Mode,
+    CycleLoss,
+    AutoLoss,
 )
 
 
@@ -38,6 +40,7 @@ def main(timestamp: str):
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
+    conf.use_vae = conf.mode == "both_unsup" and conf.loss.cycle == "vae"
     logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
@@ -96,6 +99,8 @@ def main(timestamp: str):
     trainer = Seq2seqTrainer(
         model=model,
         mode=Mode(conf.mode),
+        cycle_loss=CycleLoss(conf.loss.cycle),
+        auto_loss=AutoLoss(conf.loss.auto),
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         accelerator=accelerator,

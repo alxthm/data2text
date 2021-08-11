@@ -9,10 +9,6 @@ from torch.distributions import Normal, kl_divergence
 from torch.nn import CrossEntropyLoss
 from transformers import T5PreTrainedModel, PreTrainedTokenizer, T5Config
 from transformers.file_utils import ModelOutput
-from transformers.modeling_outputs import (
-    BaseModelOutput,
-    Seq2SeqLMOutput,
-)
 from transformers.models.t5.modeling_t5 import T5Stack
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
@@ -76,20 +72,21 @@ class GT8ModelOutput(ModelOutput):
     kl_div: Optional[torch.FloatTensor] = None
 
 
-class VariationalT5Encoder(T5PreTrainedModel):
-    def __init__(self, t5_encoder: T5Stack):
-        super().__init__(t5_encoder.config)
-        self.t5_encoder = t5_encoder
+class VariationalT5Encoder(T5Stack):
+    def __init__(self, config: T5Config, embed_tokens: nn.Embedding = None):
+        super().__init__(config, embed_tokens)
 
         # additional layers for the variational posterior
-        model_dim = t5_encoder.config.d_model
+        model_dim = config.d_model
         self.mu_z = nn.Linear(model_dim, model_dim)
         self.log_sigma_z = nn.Linear(model_dim, model_dim)
 
     def forward(self, *args, **kwargs):
         # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
         assert kwargs["return_dict"]
-        encoder_outputs = self.t5_encoder(*args, **kwargs)
+        # call T5Stack.forward (using forward, not __call__, see
+        # https://discuss.pytorch.org/t/recursionerror-calling-super-call-in-forward/57387)
+        encoder_outputs = super().forward(*args, **kwargs)
         mu_z = self.mu_z(encoder_outputs.last_hidden_state)
         log_sigma_z = self.log_sigma_z(encoder_outputs.last_hidden_state)
 
@@ -134,10 +131,11 @@ class GT8(T5PreTrainedModel):
         encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
         if use_vae:
             # the same T5 encoder, but augmented with variational parameters
-            self.vae_encoder = VariationalT5Encoder(self.encoder)
+            self.encoder = VariationalT5Encoder(encoder_config, self.shared)
+        else:
+            self.encoder = T5Stack(encoder_config, self.shared)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
@@ -158,28 +156,6 @@ class GT8(T5PreTrainedModel):
             self.generate_text_token_id = generate_text_token_id
             self.generate_graph_token_id = generate_graph_token_id
 
-    def parallelize(self, device_map=None):
-        self.device_map = (
-            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
-            if device_map is None
-            else device_map
-        )
-        assert_device_map(self.device_map, len(self.encoder.block))
-        self.encoder.parallelize(self.device_map)
-        self.decoder.parallelize(self.device_map)
-        self.lm_head = self.lm_head.to(self.decoder.first_device)
-        self.model_parallel = True
-
-    def deparallelize(self):
-        self.encoder.deparallelize()
-        self.decoder.deparallelize()
-        self.encoder = self.encoder.to("cpu")
-        self.decoder = self.decoder.to("cpu")
-        self.lm_head = self.lm_head.to("cpu")
-        self.model_parallel = False
-        self.device_map = None
-        torch.cuda.empty_cache()
-
     def get_input_embeddings(self):
         return self.shared
 
@@ -195,10 +171,7 @@ class GT8(T5PreTrainedModel):
         return self.lm_head
 
     def get_encoder(self):
-        if self.use_vae:
-            return self.vae_encoder
-        else:
-            return self.encoder
+        return self.encoder
 
     def get_decoder(self):
         return self.decoder
@@ -269,8 +242,7 @@ class GT8(T5PreTrainedModel):
 
         # Encode if needed (training, first prediction pass(?))
         if encoder_outputs is None:
-            encoder = self.vae_encoder if self.use_vae else self.encoder
-            encoder_outputs = encoder(
+            encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 inputs_embeds=inputs_embeds,
@@ -437,6 +409,7 @@ class GT8(T5PreTrainedModel):
 
     def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor, target: str):
         # in principle, this method should not be called
+        raise AssertionError
         return self._shift_right(labels, target)
 
     def _reorder_cache(self, past, beam_idx):
