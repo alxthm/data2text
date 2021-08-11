@@ -184,8 +184,6 @@ class Seq2seqTrainer:
                 graph_outputs = None
                 syn_text_ids = None  # synthetic text and graphs
                 syn_graph_ids = None
-                t2g_logits = None
-                g2t_logits = None
                 noisy_text_ids = None
                 noisy_graph_ids = None
                 if self.mode == Mode.t2g:
@@ -285,6 +283,11 @@ class Seq2seqTrainer:
                     g2t_logits=g2t_outputs.logits if g2t_outputs else None,
                 )
 
+            # free GPU memory before eval
+            t2g_outputs = None
+            g2t_outputs = None
+            text_outputs = None
+            graph_outputs = None
             # evaluate after each epoch (and save model checkpoint if necessary)
             self.evaluator.on_epoch_end(epoch)
             self.logger.send_current_logs()

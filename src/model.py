@@ -9,6 +9,7 @@ from torch.distributions import Normal, kl_divergence
 from torch.nn import CrossEntropyLoss
 from transformers import T5PreTrainedModel, PreTrainedTokenizer, T5Config
 from transformers.file_utils import ModelOutput
+from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.t5.modeling_t5 import T5Stack
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
@@ -193,7 +194,7 @@ class GT8(T5PreTrainedModel):
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
-        return_dict=True,
+        return_dict=None,
         target=None,
         vae_z=None,
     ):
@@ -232,7 +233,12 @@ class GT8(T5PreTrainedModel):
             assert vae_z is None
         # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
         # -> just make sure this is never overridden to False
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
         assert return_dict
+        # same for model_parallel (make sure we don't use it)
+        assert not self.model_parallel
 
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
@@ -266,9 +272,6 @@ class GT8(T5PreTrainedModel):
         else:
             hidden_states = vae_z
 
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-
         if (
             labels is not None
             and decoder_input_ids is None
@@ -288,19 +291,6 @@ class GT8(T5PreTrainedModel):
             if decoder_inputs_embeds is not None:
                 decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
 
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-            hidden_states = hidden_states.to(self.decoder.first_device)
-            if decoder_input_ids is not None:
-                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(self.decoder.first_device)
-            if decoder_attention_mask is not None:
-                decoder_attention_mask = decoder_attention_mask.to(
-                    self.decoder.first_device
-                )
-
         # Decode
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
@@ -318,12 +308,6 @@ class GT8(T5PreTrainedModel):
         )
 
         sequence_output = decoder_outputs.last_hidden_state
-
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.encoder.first_device)
-            self.lm_head = self.lm_head.to(self.encoder.first_device)
-            sequence_output = sequence_output.to(self.lm_head.weight.device)
 
         if self.config.tie_word_embeddings:
             # Rescale output before projecting on vocab
@@ -406,11 +390,6 @@ class GT8(T5PreTrainedModel):
             inputs["vae_z"] = vae_z
 
         return inputs
-
-    def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor, target: str):
-        # in principle, this method should not be called
-        raise AssertionError
-        return self._shift_right(labels, target)
 
     def _reorder_cache(self, past, beam_idx):
         # if decoder past is not included in output
