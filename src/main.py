@@ -46,7 +46,9 @@ def main(timestamp: str):
     # seed everything
     seed_everything(conf.seed)
 
-    run_name = f"{timestamp}-{conf.mode}-{conf.model}"
+    run_name = (
+        f"{timestamp}-{conf.mode}-{conf.model}-{conf.loss.auto}-{conf.loss.cycle}"
+    )
     logging.info(f"run_name: {run_name}\n")
     if use_loggers:
         tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
