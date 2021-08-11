@@ -531,21 +531,22 @@ class GT8(T5PreTrainedModel):
 
         if is_encoder_decoder:
             assert encoder_outputs is not None
-            last_hidden_states = encoder_outputs.last_hidden_state.index_select(
+            encoder_outputs[
+                "last_hidden_state"
+            ] = encoder_outputs.last_hidden_state.index_select(
                 0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device)
             )
-            encoder_outputs["last_hidden_state"] = last_hidden_states
 
             if "mu_z" in encoder_outputs:
                 # if we have a VAE model
-                mu_z = encoder_outputs.mu_z.index_select(
+                encoder_outputs["mu_z"] = encoder_outputs.mu_z.index_select(
                     0, expanded_return_idx.to(encoder_outputs.mu_z.device)
                 )
-                log_sigma_z = encoder_outputs.log_sigma_z.index_select(
+                encoder_outputs[
+                    "log_sigma_z"
+                ] = encoder_outputs.log_sigma_z.index_select(
                     0, expanded_return_idx.to(encoder_outputs.log_sigma_z.device)
                 )
-                encoder_outputs["mu_z"] = mu_z
-                encoder_outputs["log_sigma_z"] = log_sigma_z
 
             model_kwargs["encoder_outputs"] = encoder_outputs
 
