@@ -1,15 +1,15 @@
 import copy
 import warnings
+from typing import Tuple, Optional, Dict, Any
 
 import torch
+from dataclasses import dataclass
 from torch import nn
-from torch.distributions import Normal
+from torch.distributions import Normal, kl_divergence
 from torch.nn import CrossEntropyLoss
-from transformers import T5PreTrainedModel, PreTrainedTokenizer
-from transformers.modeling_outputs import (
-    BaseModelOutput,
-    Seq2SeqLMOutput,
-)
+from transformers import T5PreTrainedModel, PreTrainedTokenizer, T5Config
+from transformers.file_utils import ModelOutput
+from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.t5.modeling_t5 import T5Stack
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
@@ -24,6 +24,82 @@ The input argument `head_mask` was split into two arguments `head_mask` and `dec
 If you do not want to use any `decoder_head_mask` now, please set `decoder_head_mask = torch.ones(num_layers,
 num_heads)`.
 """
+
+
+@dataclass
+class VariationalT5EncoderOutput(ModelOutput):
+    """
+    Same attributes as the BaseModelOutputWithPastAndCrossAttentions class (output of the regular
+    encoder, T5Stack)
+
+    And some attributes from the VAE encoder:
+        mu_z
+        log_sigma_z
+    """
+
+    last_hidden_state: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+    # mean and log_std of the variational posterior (VAE encoder)
+    mu_z: torch.FloatTensor = None
+    log_sigma_z: torch.FloatTensor = None
+
+
+@dataclass
+class GT8ModelOutput(ModelOutput):
+    """
+    Same attributes as the BaseModelOutputWithPastAndCrossAttentions class (output of the regular
+    encoder, T5Stack)
+
+    And some attributes from the VAE model:
+        recon_loss: reconstruction loss (identical to loss, if we don't use VAE)
+        kl_div
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_last_hidden_state: Optional[torch.FloatTensor] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+    recon_loss: Optional[torch.FloatTensor] = None
+    kl_div: Optional[torch.FloatTensor] = None
+
+
+class VariationalT5Encoder(T5Stack):
+    def __init__(self, config: T5Config, embed_tokens: nn.Embedding = None):
+        super().__init__(config, embed_tokens)
+
+        # additional layers for the variational posterior
+        model_dim = config.d_model
+        self.mu_z = nn.Linear(model_dim, model_dim)
+        self.log_sigma_z = nn.Linear(model_dim, model_dim)
+
+    def forward(self, *args, **kwargs):
+        # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
+        assert kwargs["return_dict"]
+        # call T5Stack.forward (using forward, not __call__, see
+        # https://discuss.pytorch.org/t/recursionerror-calling-super-call-in-forward/57387)
+        encoder_outputs = super().forward(*args, **kwargs)
+        mu_z = self.mu_z(encoder_outputs.last_hidden_state)
+        log_sigma_z = self.log_sigma_z(encoder_outputs.last_hidden_state)
+
+        return VariationalT5EncoderOutput(
+            last_hidden_state=encoder_outputs.last_hidden_state,
+            past_key_values=encoder_outputs.past_key_values,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+            cross_attentions=encoder_outputs.cross_attentions,
+            mu_z=mu_z,
+            log_sigma_z=log_sigma_z,
+        )
 
 
 class GT8(T5PreTrainedModel):
@@ -41,12 +117,14 @@ class GT8(T5PreTrainedModel):
     def __init__(
         self,
         config,
+        use_vae: bool,
         specify_target_with_prefix: bool,
         generate_text_token_id: int,
         generate_graph_token_id: int,
     ):
         super().__init__(config)
         self.model_dim = config.d_model
+        self.use_vae = use_vae
 
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
 
@@ -54,7 +132,11 @@ class GT8(T5PreTrainedModel):
         encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
+        if use_vae:
+            # the same T5 encoder, but augmented with variational parameters
+            self.encoder = VariationalT5Encoder(encoder_config, self.shared)
+        else:
+            self.encoder = T5Stack(encoder_config, self.shared)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
@@ -74,28 +156,6 @@ class GT8(T5PreTrainedModel):
         if not specify_target_with_prefix:
             self.generate_text_token_id = generate_text_token_id
             self.generate_graph_token_id = generate_graph_token_id
-
-    def parallelize(self, device_map=None):
-        self.device_map = (
-            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
-            if device_map is None
-            else device_map
-        )
-        assert_device_map(self.device_map, len(self.encoder.block))
-        self.encoder.parallelize(self.device_map)
-        self.decoder.parallelize(self.device_map)
-        self.lm_head = self.lm_head.to(self.decoder.first_device)
-        self.model_parallel = True
-
-    def deparallelize(self):
-        self.encoder.deparallelize()
-        self.decoder.deparallelize()
-        self.encoder = self.encoder.to("cpu")
-        self.decoder = self.decoder.to("cpu")
-        self.lm_head = self.lm_head.to("cpu")
-        self.model_parallel = False
-        self.device_map = None
-        torch.cuda.empty_cache()
 
     def get_input_embeddings(self):
         return self.shared
@@ -136,6 +196,7 @@ class GT8(T5PreTrainedModel):
         output_hidden_states=None,
         return_dict=None,
         target=None,
+        vae_z=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
@@ -162,9 +223,22 @@ class GT8(T5PreTrainedModel):
             >>> outputs = model.generate(input_ids)
         """
         use_cache = use_cache if use_cache is not None else self.config.use_cache
+        if self.use_vae:
+            # if we use the vae, vae_z should be either specified (during prediction),
+            # either sampled (during training)
+            assert (encoder_outputs is None and vae_z is None) or (
+                encoder_outputs is not None and vae_z is not None
+            )
+        else:
+            assert vae_z is None
+        # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
+        # -> just make sure this is never overridden to False
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+        assert return_dict
+        # same for model_parallel (make sure we don't use it)
+        assert not self.model_parallel
 
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
@@ -172,9 +246,8 @@ class GT8(T5PreTrainedModel):
                 warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
                 decoder_head_mask = head_mask
 
-        # Encode if needed (training, first prediction pass)
+        # Encode if needed (training, first prediction pass(?))
         if encoder_outputs is None:
-            # Convert encoder inputs in embeddings if needed
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -184,17 +257,20 @@ class GT8(T5PreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
-            )
 
-        hidden_states = encoder_outputs[0]
+            if self.use_vae:
+                # during training, sample z from variational posterior
+                q_phi = Normal(
+                    loc=encoder_outputs.mu_z,
+                    scale=torch.exp(encoder_outputs.log_sigma_z),
+                )
+                vae_z = q_phi.rsample()  # same dimension as mu_z (N, T, model_dim)
 
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
+        # to be fed to the decoder
+        if vae_z is None:
+            hidden_states = encoder_outputs.last_hidden_state
+        else:
+            hidden_states = vae_z
 
         if (
             labels is not None
@@ -215,19 +291,6 @@ class GT8(T5PreTrainedModel):
             if decoder_inputs_embeds is not None:
                 decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
 
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-            hidden_states = hidden_states.to(self.decoder.first_device)
-            if decoder_input_ids is not None:
-                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(self.decoder.first_device)
-            if decoder_attention_mask is not None:
-                decoder_attention_mask = decoder_attention_mask.to(
-                    self.decoder.first_device
-                )
-
         # Decode
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
@@ -244,13 +307,7 @@ class GT8(T5PreTrainedModel):
             return_dict=return_dict,
         )
 
-        sequence_output = decoder_outputs[0]
-
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.encoder.first_device)
-            self.lm_head = self.lm_head.to(self.encoder.first_device)
-            sequence_output = sequence_output.to(self.lm_head.weight.device)
+        sequence_output = decoder_outputs.last_hidden_state
 
         if self.config.tie_word_embeddings:
             # Rescale output before projecting on vocab
@@ -259,18 +316,32 @@ class GT8(T5PreTrainedModel):
 
         lm_logits = self.lm_head(sequence_output)
 
-        loss = None
+        loss, recon_loss, kl_div = None, None, None
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
-            # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
+            recon_loss = loss_fct(
+                lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1)
+            )
 
-        if not return_dict:
-            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
-            return ((loss,) + output) if loss is not None else output
+            if self.use_vae:
+                prior = Normal(
+                    loc=torch.zeros_like(encoder_outputs.mu_z),
+                    scale=torch.ones_like(encoder_outputs.mu_z),
+                )
+                kl_div = kl_divergence(q_phi, prior)  # (N, T, model_dim) as well
+                # reduce to a scalar by:
+                #   - summing over latent dim, to obtain the D_KL between multivariate Normal distributions
+                #   - taking the mean over batch and sequence dim, to match the
+                #       CrossEntropyLoss (which takes mean over N and T as well)
+                kl_div = kl_div.sum(dim=2).mean()
+                loss = recon_loss - kl_div
+            else:
+                loss = recon_loss
 
-        return Seq2SeqLMOutput(
+        return GT8ModelOutput(
             loss=loss,
+            kl_div=kl_div,
+            recon_loss=recon_loss,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
@@ -298,7 +369,7 @@ class GT8(T5PreTrainedModel):
         if past is not None:
             input_ids = input_ids[:, -1:]
 
-        return {
+        inputs = {
             "decoder_input_ids": input_ids,
             "past_key_values": past,
             "encoder_outputs": encoder_outputs,
@@ -309,9 +380,16 @@ class GT8(T5PreTrainedModel):
             "use_cache": use_cache,
         }
 
-    def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor, target: str):
-        # in principle, this method should not be called
-        return self._shift_right(labels, target)
+        if self.use_vae:
+            if "vae_z" in kwargs:
+                # use vae_z specified as an kwarg to the generate method
+                vae_z = kwargs["vae_z"]
+            else:
+                # take mu_z (but we could also sample)
+                vae_z = encoder_outputs.mu_z
+            inputs["vae_z"] = vae_z
+
+        return inputs
 
     def _reorder_cache(self, past, beam_idx):
         # if decoder past is not included in output
@@ -394,6 +472,64 @@ class GT8(T5PreTrainedModel):
         ).item(), "Verify that `shifted_input_ids` has only positive values"
 
         return shifted_input_ids
+
+    @staticmethod
+    def _expand_inputs_for_generation(
+        input_ids: torch.LongTensor,
+        expand_size: int = 1,
+        is_encoder_decoder: bool = False,
+        attention_mask: torch.LongTensor = None,
+        encoder_outputs: VariationalT5EncoderOutput = None,
+        **model_kwargs,
+    ) -> Tuple[torch.LongTensor, Dict[str, Any]]:
+        """
+        Expand tensors across the batch dimension, e.g. to have num_beams*batch_size
+        instead of batch_size, during beam search generation
+
+        We redefine this function to also expand vae_mu_z/vae_sigma_z (in encoder_outputs).
+        """
+        expanded_return_idx = (
+            torch.arange(input_ids.shape[0])
+            .view(-1, 1)
+            .repeat(1, expand_size)
+            .view(-1)
+            .to(input_ids.device)
+        )
+        input_ids = input_ids.index_select(0, expanded_return_idx)
+
+        if "token_type_ids" in model_kwargs:
+            token_type_ids = model_kwargs["token_type_ids"]
+            model_kwargs["token_type_ids"] = token_type_ids.index_select(
+                0, expanded_return_idx
+            )
+
+        if attention_mask is not None:
+            model_kwargs["attention_mask"] = attention_mask.index_select(
+                0, expanded_return_idx
+            )
+
+        if is_encoder_decoder:
+            assert encoder_outputs is not None
+            encoder_outputs[
+                "last_hidden_state"
+            ] = encoder_outputs.last_hidden_state.index_select(
+                0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device)
+            )
+
+            if "mu_z" in encoder_outputs:
+                # if we have a VAE model
+                encoder_outputs["mu_z"] = encoder_outputs.mu_z.index_select(
+                    0, expanded_return_idx.to(encoder_outputs.mu_z.device)
+                )
+                encoder_outputs[
+                    "log_sigma_z"
+                ] = encoder_outputs.log_sigma_z.index_select(
+                    0, expanded_return_idx.to(encoder_outputs.log_sigma_z.device)
+                )
+
+            model_kwargs["encoder_outputs"] = encoder_outputs
+
+        return input_ids, model_kwargs
 
     def generate_with_target(
         self,

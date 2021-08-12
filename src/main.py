@@ -20,6 +20,8 @@ from src.utils import (
     mlflow_log_src_and_config,
     ModelSummary,
     Mode,
+    CycleLoss,
+    AutoLoss,
 )
 
 
@@ -38,12 +40,15 @@ def main(timestamp: str):
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
+    conf.use_vae = conf.loss.cycle == "vae"
     logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
     seed_everything(conf.seed)
 
-    run_name = f"{timestamp}-{conf.mode}-{conf.model}"
+    run_name = (
+        f"{timestamp}-{conf.mode}-{conf.model}-{conf.loss.auto}-{conf.loss.cycle}"
+    )
     logging.info(f"run_name: {run_name}\n")
     if use_loggers:
         tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
@@ -83,6 +88,7 @@ def main(timestamp: str):
     # prepare model
     model = GT8.from_pretrained(
         conf.model,
+        use_vae=conf.use_vae,
         specify_target_with_prefix=conf.specify_target_with_prefix,
         generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
         generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
@@ -95,6 +101,8 @@ def main(timestamp: str):
     trainer = Seq2seqTrainer(
         model=model,
         mode=Mode(conf.mode),
+        cycle_loss=CycleLoss(conf.loss.cycle),
+        auto_loss=AutoLoss(conf.loss.auto),
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         accelerator=accelerator,
