@@ -334,7 +334,8 @@ class GT8(T5PreTrainedModel):
                 #   - taking the mean over batch and sequence dim, to match the
                 #       CrossEntropyLoss (which takes mean over N and T as well)
                 kl_div = kl_div.sum(dim=2).mean()
-                loss = recon_loss - kl_div
+                # loss = -L_elbo = -log p(x|z) + KL(q(z|x) || p(z))
+                loss = recon_loss + kl_div
             else:
                 loss = recon_loss
 
