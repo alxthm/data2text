@@ -335,7 +335,7 @@ class Seq2seqTrainer:
             "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
             "train/epoch": epoch,
         }
-        for m in ["t2g", "g2t", "auto", "cycle"]:
+        for m in ["t2g", "g2t", "text", "graph"]:
             # for each mode, log our regular and vae metrics
             if kwargs.get(f"{m}_outputs", None) is not None:
                 outputs = kwargs[f"{m}_outputs"]
