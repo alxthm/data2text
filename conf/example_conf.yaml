@@ -4,11 +4,11 @@ mlflow:
 
 seed: 0
 model: "t5-base"
-specify_target_with_prefix: False  # specify target either as a prefix to the encoder input, or with the decoder_start_token_id
+specify_target_with_prefix: True  # specify target either as a prefix to the encoder input, or with the decoder_start_token_id
 fast_dev_run: False
 
 # training
-mode: "both_unsup"
+mode: "t2g"
 epochs: 5
 lr: 1.0e-4
 lr_scheduler: "linear"  # can also be 'constant'
@@ -22,6 +22,15 @@ sample_noise_fun:  # which noise functions to sample from?
   - "blank"
   - "rule"
   - "repeat"
+
+loss:
+  cycle: "vae" #"vae" or "regular"
+  auto: "denoising"  # "vae" or "denoising"
+beta:
+  start: 0 #beta min
+  stop: 1  # beta max
+  n_cycle: 4
+  ratio: 0.5
 
 # validation
 num_beams_t2g: 8

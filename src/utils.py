@@ -172,6 +172,16 @@ class MyLogger:
 #             )
 
 
+def frange_cycle_linear(batch, num_training_steps, start, stop, n_cycle, ratio):
+    period = int(num_training_steps / n_cycle)
+    step = (stop - start) / (period * ratio)  # linear schedule
+    if batch % period < period * ratio:
+        beta = batch % period * step
+    else:
+        beta = 1
+    return beta
+
+
 def seed_everything(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
