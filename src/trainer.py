@@ -341,7 +341,7 @@ class Seq2seqTrainer:
                 outputs = kwargs[f"{m}_outputs"]
                 metrics[f"train/loss_{m}"] = outputs.loss.item()
                 if "kl_div" in outputs:
-                    metrics[f"train/kl_div_{m}"] = outputs.kl_div.item()
+                    metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
                     metrics[f"train/recon_loss_{m}"] = outputs.recon_loss.item()
 
         self.logger.log_metrics(metrics, step=global_step)
