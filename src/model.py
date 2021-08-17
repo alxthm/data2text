@@ -635,6 +635,7 @@ class GT8(T5PreTrainedModel):
 
     @staticmethod
     def compute_kernel(x: torch.Tensor, y: torch.Tensor):
+        # original implementation: https://ermongroup.github.io/blog/a-tutorial-on-mmd-variational-autoencoders/
         N, T, dim = x.shape
         assert x.shape == y.shape
 
@@ -642,12 +643,11 @@ class GT8(T5PreTrainedModel):
         # so we consider latent samples across time dimension independently, and we use N**2 * T samples
         tiled_x = x.view(N, 1, T, dim).repeat(1, N, 1, 1)
         tiled_y = y.view(1, N, T, dim).repeat(N, 1, 1, 1)
-        # original implementation (https://ermongroup.github.io/blog/a-tutorial-on-mmd-variational-autoencoders/)
-        return torch.exp(-torch.mean((tiled_x - tiled_y) ** 2, dim=-1) / dim)
 
-        # equivalent implementation ?
-        # sigma_sqr = dim ** 2
-        # return torch.exp(-0.5 * torch.norm(tiled_x - tiled_y, dim=2) / sigma_sqr)
+        # compute RBF kernel k(x,y), shape: (N, N, T)
+        sigma_sqr = dim ** 2 / 2
+        squared_dist_xy = torch.sum((tiled_x - tiled_y) ** 2, dim=-1)
+        return torch.exp(-0.5 * squared_dist_xy / sigma_sqr)
 
     def compute_mmd(self, x: torch.Tensor, y: torch.Tensor):
         x_kernel = self.compute_kernel(x, x)
