@@ -340,7 +340,7 @@ class Seq2seqTrainer:
             if kwargs.get(f"{m}_outputs", None) is not None:
                 outputs = kwargs[f"{m}_outputs"]
                 metrics[f"train/loss_{m}"] = outputs.loss.item()
-                if "kl_div" in outputs:
+                if "recon_loss" in outputs:
                     metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
                     metrics[f"train/recon_loss_{m}"] = outputs.recon_loss.item()
 

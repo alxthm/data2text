@@ -88,10 +88,12 @@ def main(timestamp: str):
     # prepare model
     model = GT8.from_pretrained(
         conf.model,
-        use_vae=conf.use_vae,
         specify_target_with_prefix=conf.specify_target_with_prefix,
         generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
         generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+        use_vae=conf.use_vae,
+        reg_loss=conf.loss.reg,
+        vae_beta=conf.beta
     )
     # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))

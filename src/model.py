@@ -610,12 +610,10 @@ class GT8(T5PreTrainedModel):
         return prediction_ids
 
     def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
-        N, T, dim_z = z.shape
-
-        # N(0,I) prior
+        # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
         prior = Normal(
-            loc=torch.zeros(N, T, dim_z),
-            scale=torch.ones(N, T, dim_z),
+            loc=torch.zeros_like(q_phi.loc),
+            scale=torch.ones_like(q_phi.scale),
         )
 
         if self.reg_loss_type == "kl":
@@ -629,22 +627,23 @@ class GT8(T5PreTrainedModel):
             return kl_div
         elif self.reg_loss_type == "mmd":
             # https://github.com/amir-abdi/disentanglement-pytorch/blob/master/models/infovae.py
-            z_prior = prior.rsample(z.shape)
-            mmd = self.compute_mmd(z.view(-1, dim_z), z_prior.view(-1, dim_z))
+            z_prior = prior.rsample()
+            mmd = self.compute_mmd(z, z_prior)
             return mmd
         else:
             raise ValueError
 
     @staticmethod
     def compute_kernel(x: torch.Tensor, y: torch.Tensor):
-        x_size, dim = x.shape
-        y_size, dim_y = y.shape
-        assert dim == dim_y
+        N, T, dim = x.shape
+        assert x.shape == y.shape
 
-        tiled_x = x.view(x_size, 1, dim).repeat(1, y_size, 1)
-        tiled_y = y.view(1, y_size, dim).repeat(x_size, 1, 1)
+        # having (N*T)**2 samples with T=256 is impossible (50GB in memory)
+        # so we consider latent samples across time dimension independently, and we use N**2 * T samples
+        tiled_x = x.view(N, 1, T, dim).repeat(1, N, 1, 1)
+        tiled_y = y.view(1, N, T, dim).repeat(N, 1, 1, 1)
         # original implementation (https://ermongroup.github.io/blog/a-tutorial-on-mmd-variational-autoencoders/)
-        return torch.exp(-torch.mean((tiled_x - tiled_y) ** 2, dim=2) / dim)
+        return torch.exp(-torch.mean((tiled_x - tiled_y) ** 2, dim=-1) / dim)
 
         # equivalent implementation ?
         # sigma_sqr = dim ** 2
