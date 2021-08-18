@@ -20,7 +20,7 @@ from src.data.datasets import Seq2seqDataset
 from src.data.formatting import add_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
-from src.utils import MyLogger, Mode, AutoLoss, CycleLoss, frange_cycle_linear
+from src.utils import MyLogger, Mode, AutoLoss, CycleLoss, frange_cycle_zero_linear
 
 project_dir = Path(__file__).resolve().parents[1]
 conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
@@ -160,6 +160,7 @@ class Seq2seqTrainer:
 
     def train(self):
         global_step = 0
+        betas = frange_cycle_zero_linear(self.num_training_steps, conf.beta_n_cylcle)
         logging.info("Training...")
         logging.info(f"     num_epochs: {self.num_epochs}")
 
@@ -172,15 +173,6 @@ class Seq2seqTrainer:
                 # stop training if a max number of steps was specified
                 if global_step > self.num_training_steps * (epoch + 1):
                     break
-
-                beta = frange_cycle_linear(
-                    batch=global_step,
-                    num_training_steps=self.num_training_steps,
-                    start=conf.beta.start,
-                    stop=conf.beta.stop,
-                    n_cycle=conf.beta.n_cycle,
-                    ratio=conf.beta.ratio,
-                )
 
                 # get batch data
                 text_ids = batch["text_ids"]
@@ -200,6 +192,10 @@ class Seq2seqTrainer:
                 syn_graph_ids = None
                 noisy_text_ids = None
                 noisy_graph_ids = None
+
+                # select beta
+                beta = betas[global_step].item()
+
                 if self.mode == Mode.t2g:
                     t2g_outputs = self.teach_model_one_step(
                         input_ids=text_ids,
