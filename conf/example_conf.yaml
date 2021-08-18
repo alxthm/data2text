@@ -26,11 +26,8 @@ sample_noise_fun:  # which noise functions to sample from?
 loss:
   cycle: "vae" #"vae" or "regular"
   auto: "denoising"  # "vae" or "denoising"
-beta:
-  start: 0 #beta min
-  stop: 1  # beta max
-  n_cycle: 4
-  ratio: 0.5
+
+beta_n_cylcle: 4
 
 # validation
 num_beams_t2g: 8
