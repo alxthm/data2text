@@ -341,8 +341,9 @@ class Seq2seqTrainer:
                 outputs = kwargs[f"{m}_outputs"]
                 metrics[f"train/loss_{m}"] = outputs.loss.item()
                 if "recon_loss" in outputs:
-                    metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
                     metrics[f"train/recon_loss_{m}"] = outputs.recon_loss.item()
+                if "reg_loss" in outputs:
+                    metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
 
         self.logger.log_metrics(metrics, step=global_step)
 
