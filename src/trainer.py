@@ -64,11 +64,11 @@ class Seq2seqTrainer:
         )
         # prepare model and data for multi gpu training (if necessary)
         self.accelerator = accelerator
-        (
-            self.ddp_model,
-            self.optimizer,
-            self.train_dataloader,
-        ) = accelerator.prepare(model, optimizer, train_dataloader)
+        self.ddp_model, optimizer, train_dataloader = accelerator.prepare(
+            model, optimizer, train_dataloader
+        )
+        self.optimizer = optimizer
+        self.train_dataloader = train_dataloader
 
         # training parameters
         self.batch_size = batch_size
@@ -77,7 +77,7 @@ class Seq2seqTrainer:
             # stop early for testing purposes
             self.max_training_steps = max_training_steps
         else:
-            self.max_training_steps = len(train_dataloader)
+            self.max_training_steps = len(self.train_dataloader)
         num_training_steps = num_epochs * self.max_training_steps
         self.num_epochs = num_epochs
         self.lr_scheduler = get_scheduler(
