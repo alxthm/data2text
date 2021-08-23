@@ -377,6 +377,11 @@ class Seq2seqTrainer:
                 if "reg_loss" in outputs:
                     metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
 
+        # log vae_beta coeff if we have a VAE model
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        if hasattr(model, "beta"):
+            metrics["beta_t"] = model.beta
+
         self.logger.log_metrics(metrics, step=global_step)
 
     def log_training_samples(self, global_step: int, epoch: int, **kwargs):
