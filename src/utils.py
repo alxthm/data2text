@@ -175,7 +175,7 @@ class MyLogger:
 def frange_cycle_zero_linear(
     n_iter, n_cycle, start=0.0, stop=1.0, ratio_increase=0.5, ratio_zero=0.3
 ):
-    L = torch.ones(n_iter) * stop
+    L = [stop] * n_iter
     period = n_iter / n_cycle
     step = (stop - start) / (period * ratio_increase)  # linear schedule
 
@@ -189,16 +189,6 @@ def frange_cycle_zero_linear(
                 v += step
             i += 1
     return L
-
-
-def frange_cycle_linear(batch, num_training_steps, start, stop, n_cycle, ratio):
-    period = int(num_training_steps / n_cycle)
-    step = (stop - start) / (period * ratio)  # linear schedule
-    if batch % period < period * ratio:
-        beta = batch % period * step
-    else:
-        beta = 1
-    return beta
 
 
 def seed_everything(seed: int):

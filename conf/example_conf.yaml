@@ -27,7 +27,7 @@ loss:
   cycle: "vae" #"vae" or "regular"
   auto: "denoising"  # "vae" or "denoising"
 
-beta_n_cylcle: 4
+beta_n_cycle: 4  # number of cycles for the beta-VAE schedule (-1 for regular VAE: constant beta=1)
 
 # validation
 num_beams_t2g: 8

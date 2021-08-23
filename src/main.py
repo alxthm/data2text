@@ -103,6 +103,7 @@ def main(timestamp: str):
         mode=Mode(conf.mode),
         cycle_loss=CycleLoss(conf.loss.cycle),
         auto_loss=AutoLoss(conf.loss.auto),
+        beta_n_cycle=conf.beta_n_cycle,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         accelerator=accelerator,
