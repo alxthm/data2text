@@ -56,7 +56,7 @@ class GT8ModelOutput(ModelOutput):
 
     And some attributes from the VAE model:
         recon_loss: reconstruction loss (identical to loss, if we don't use VAE)
-        kl_div
+        reg_loss: either KL(q(z|x)||p(z)) or MMD(q(z)||p(z))
     """
 
     loss: Optional[torch.FloatTensor] = None
@@ -70,7 +70,7 @@ class GT8ModelOutput(ModelOutput):
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
     recon_loss: Optional[torch.FloatTensor] = None
-    kl_div: Optional[torch.FloatTensor] = None
+    reg_loss: Optional[torch.FloatTensor] = None
 
 
 class VariationalT5Encoder(T5Stack):
@@ -117,10 +117,11 @@ class GT8(T5PreTrainedModel):
     def __init__(
         self,
         config,
-        use_vae: bool,
         specify_target_with_prefix: bool,
         generate_text_token_id: int,
         generate_graph_token_id: int,
+        use_vae: bool,
+        reg_loss: Optional[str] = None,
     ):
         super().__init__(config)
         self.model_dim = config.d_model
@@ -135,6 +136,7 @@ class GT8(T5PreTrainedModel):
         if use_vae:
             # the same T5 encoder, but augmented with variational parameters
             self.encoder = VariationalT5Encoder(encoder_config, self.shared)
+            self.reg_loss_type = reg_loss
         else:
             self.encoder = T5Stack(encoder_config, self.shared)
 
@@ -197,6 +199,7 @@ class GT8(T5PreTrainedModel):
         return_dict=None,
         target=None,
         vae_z=None,
+        beta=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
@@ -316,7 +319,7 @@ class GT8(T5PreTrainedModel):
 
         lm_logits = self.lm_head(sequence_output)
 
-        loss, recon_loss, kl_div = None, None, None
+        loss, recon_loss, reg_loss = None, None, None
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             recon_loss = loss_fct(
@@ -324,24 +327,18 @@ class GT8(T5PreTrainedModel):
             )
 
             if self.use_vae:
-                prior = Normal(
-                    loc=torch.zeros_like(encoder_outputs.mu_z),
-                    scale=torch.ones_like(encoder_outputs.mu_z),
-                )
-                kl_div = kl_divergence(q_phi, prior)  # (N, T, model_dim) as well
-                # reduce to a scalar by:
-                #   - summing over latent dim, to obtain the D_KL between multivariate Normal distributions
-                #   - taking the mean over batch and sequence dim, to match the
-                #       CrossEntropyLoss (which takes mean over N and T as well)
-                kl_div = kl_div.sum(dim=2).mean()
-                # loss = -L_elbo = -log p(x|z) + KL(q(z|x) || p(z))
-                loss = recon_loss + kl_div
+                reg_loss = self.compute_reg_loss(q_phi=q_phi, z=vae_z)
+                # loss = -L_elbo = -log p(x|z) + beta * reg_loss
+                # where reg_loss can be
+                #   - KL(q(z|x) || p(z)) (regular VAE)
+                #   - MMD(q(z) || p(z)) (MMD VAE)
+                loss = recon_loss + beta * reg_loss
             else:
                 loss = recon_loss
 
         return GT8ModelOutput(
             loss=loss,
-            kl_div=kl_div,
+            reg_loss=reg_loss,
             recon_loss=recon_loss,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
@@ -610,3 +607,50 @@ class GT8(T5PreTrainedModel):
                 raise ValueError
 
         return prediction_ids
+
+    def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
+        # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
+        prior = Normal(
+            loc=torch.zeros_like(q_phi.loc),
+            scale=torch.ones_like(q_phi.scale),
+        )
+
+        if self.reg_loss_type == "kl":
+            # (N, T, dim_z) as well, since kl_divergence on Normal distributions does not reduce result
+            kl_div = kl_divergence(q_phi, prior)
+            # reduce to a scalar by:
+            #   - summing over latent dim, to obtain the D_KL between multivariate Normal distributions
+            #   - taking the mean over batch and sequence dim, to match the
+            #       CrossEntropyLoss (which takes mean over N and T as well)
+            kl_div = kl_div.sum(dim=2).mean()
+            return kl_div
+        elif self.reg_loss_type == "mmd":
+            # https://github.com/amir-abdi/disentanglement-pytorch/blob/master/models/infovae.py
+            z_prior = prior.rsample()
+            mmd = self.compute_mmd(z, z_prior)
+            return mmd
+        else:
+            raise ValueError
+
+    @staticmethod
+    def compute_kernel(x: torch.Tensor, y: torch.Tensor):
+        # original implementation: https://ermongroup.github.io/blog/a-tutorial-on-mmd-variational-autoencoders/
+        N, T, dim = x.shape
+        assert x.shape == y.shape
+
+        # having (N*T)**2 samples with T=256 is impossible (50GB in memory)
+        # so we consider latent samples across time dimension independently, and we use N**2 * T samples
+        tiled_x = x.view(N, 1, T, dim).repeat(1, N, 1, 1)
+        tiled_y = y.view(1, N, T, dim).repeat(N, 1, 1, 1)
+
+        # compute RBF kernel k(x,y), shape: (N, N, T)
+        sigma_sqr = dim ** 2 / 2
+        squared_dist_xy = torch.sum((tiled_x - tiled_y) ** 2, dim=-1)
+        return torch.exp(-0.5 * squared_dist_xy / sigma_sqr)
+
+    def compute_mmd(self, x: torch.Tensor, y: torch.Tensor):
+        x_kernel = self.compute_kernel(x, x)
+        y_kernel = self.compute_kernel(y, y)
+        xy_kernel = self.compute_kernel(x, y)
+        # MMD = E[k(x,x)] + E[k(y,y)] - 2 * E[k(x,y)]
+        return torch.mean(x_kernel) + torch.mean(y_kernel) - 2 * torch.mean(xy_kernel)
