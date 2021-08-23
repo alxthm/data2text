@@ -22,7 +22,6 @@ from src.eval.evaluator import EvaluatorWebNLG
 from src.utils import MyLogger, Mode, AutoLoss, CycleLoss, frange_cycle_zero_linear
 
 
-
 class Seq2seqTrainer:
     # to be set after trainer init (we need to create Trainer with accelerator first)
     evaluator: EvaluatorWebNLG
@@ -33,6 +32,7 @@ class Seq2seqTrainer:
         mode: Mode,
         cycle_loss: str,
         auto_loss: str,
+        vae_beta: float,
         beta_n_cycle: int,
         tokenizer: PreTrainedTokenizer,
         train_dataset: Seq2seqDataset,
@@ -71,27 +71,31 @@ class Seq2seqTrainer:
         ) = accelerator.prepare(model, optimizer, train_dataloader)
 
         # training parameters
+        self.batch_size = batch_size
+        # max training steps per epoch
         if max_training_steps > 0:
-            self.num_training_steps = max_training_steps * num_epochs
+            # stop early for testing purposes
+            self.max_training_steps = max_training_steps
         else:
-            self.num_training_steps = num_epochs * len(self.train_dataloader)
+            self.max_training_steps = len(train_dataloader)
+        num_training_steps = num_epochs * self.max_training_steps
         self.num_epochs = num_epochs
         self.lr_scheduler = get_scheduler(
             name=lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=0,
-            num_training_steps=self.num_training_steps,
+            num_training_steps=num_training_steps,
         )
-        self.batch_size = batch_size
         self.max_seq_length = train_dataset.max_seq_length
         self.max_grad_norm = max_grad_norm
         self.noise_functions = noise_fn
         self.generate_method = generate_method
-        self.use_cyclical_beta_schedule = (beta_n_cycle  == -1)
+        self.use_cyclical_beta_schedule = beta_n_cycle > -1
         if self.use_cyclical_beta_schedule:
-            self.betas = frange_cycle_zero_linear(self.num_training_steps, beta_n_cycle)
+            self.betas = frange_cycle_zero_linear(num_training_steps, beta_n_cycle)
         else:
-            self.beta = 1
+            # constant beta coefficient -> specify once to the model
+            model.beta = vae_beta
 
         # logging
         self.log_path = log_path
@@ -120,7 +124,7 @@ class Seq2seqTrainer:
         return prediction_ids
 
     def teach_model_one_step(
-        self, input_ids: torch.Tensor, label_ids: torch.Tensor, target: str, beta: float
+        self, input_ids: torch.Tensor, label_ids: torch.Tensor, target: str
     ):
         """
 
@@ -155,7 +159,6 @@ class Seq2seqTrainer:
             attention_mask=att_mask_input,
             labels=label_ids,
             target=target,
-            beta=beta,
         )
         loss = outputs.loss
         self.accelerator.backward(loss)
@@ -173,7 +176,7 @@ class Seq2seqTrainer:
                 disable=not self.accelerator.is_local_main_process,
             ):
                 # stop training if a max number of steps was specified
-                if global_step > self.num_training_steps * (epoch + 1):
+                if global_step >= self.max_training_steps * (epoch + 1):
                     break
 
                 # get batch data
@@ -197,45 +200,37 @@ class Seq2seqTrainer:
 
                 # select beta
                 if self.use_cyclical_beta_schedule:
-                    beta_t = self.betas[global_step]
-                else:
-                    beta_t = self.beta
+                    model = self.accelerator.unwrap_model(self.ddp_model)
+                    model.beta = self.betas[global_step]
 
                 if self.mode == Mode.t2g:
                     t2g_outputs = self.teach_model_one_step(
                         input_ids=text_ids,
                         label_ids=graph_ids,
                         target="graph",
-                        beta=beta_t,
                     )
                 elif self.mode == Mode.g2t:
                     g2t_outputs = self.teach_model_one_step(
                         input_ids=graph_ids,
                         label_ids=text_ids,
                         target="text",
-                        beta=beta_t,
                     )
                 elif self.mode == Mode.both_sup:
                     g2t_outputs = self.teach_model_one_step(
                         input_ids=graph_ids,
                         label_ids=text_ids,
                         target="text",
-                        beta=beta_t,
                     )
                     t2g_outputs = self.teach_model_one_step(
                         input_ids=text_ids,
                         label_ids=graph_ids,
                         target="graph",
-                        beta=beta_t,
                     )
                 elif self.mode == Mode.both_unsup:
                     # todo: make sure the predictions are correctly formatted, especially the attention mask
                     #   -> does it start with an unnecessary padding token?
                     #   -> should we hide the prefix ("Generate graph/text:") to the encoder in the input?
 
-                    # todo: samples will be correlated with denoising autoencoding+backtranslation
-                    #   -> do one epoch of each like GT-BT?
-                    #   -> or see what Lample does?
                     if self.auto_loss == AutoLoss.denoising:
                         # text denoising auto-encoder step
                         noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
@@ -243,7 +238,6 @@ class Seq2seqTrainer:
                             input_ids=noisy_text_ids,
                             label_ids=text_ids,
                             target="text",
-                            beta=beta_t,
                         )
                         # graph denoising auto-encoder step
                         noisy_graph_ids = self.get_noisy_inputs(
@@ -253,20 +247,17 @@ class Seq2seqTrainer:
                             input_ids=noisy_graph_ids,
                             label_ids=graph_ids,
                             target="graph",
-                            beta=beta_t,
                         )
                     elif self.auto_loss == AutoLoss.vae:
                         text_outputs = self.teach_model_one_step(
                             input_ids=text_ids,
                             label_ids=text_ids,
                             target="text",
-                            beta=beta_t,
                         )
                         graph_outputs = self.teach_model_one_step(
                             input_ids=graph_ids,
                             label_ids=graph_ids,
                             target="graph",
-                            beta=beta_t,
                         )
                     else:
                         raise ValueError
@@ -281,7 +272,6 @@ class Seq2seqTrainer:
                             input_ids=syn_graph_ids,
                             label_ids=text_ids,
                             target="text",
-                            beta=beta_t,
                         )
                         # t2g unsupervised step
                         syn_text_ids = self.predict(input_ids=graph_ids, target="text")
@@ -289,7 +279,6 @@ class Seq2seqTrainer:
                             input_ids=syn_text_ids,
                             label_ids=graph_ids,
                             target="graph",
-                            beta=beta_t,
                         )
                     else:
                         raise ValueError

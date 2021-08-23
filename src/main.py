@@ -12,8 +12,8 @@ from transformers import AutoTokenizer
 from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat, GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN
 from src.eval.evaluator import EvaluatorWebNLG
+from src.model import GT8FullVAE, GT8NonVAE
 from src.trainer import Seq2seqTrainer
-from src.model import GT8
 from src.utils import (
     WarningsFilter,
     seed_everything,
@@ -85,16 +85,22 @@ def main(timestamp: str):
     }
     train_dataset = datasets["train"]
 
-    # prepare model
-    model = GT8.from_pretrained(
-        conf.model,
-        specify_target_with_prefix=conf.specify_target_with_prefix,
-        generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-        generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
-        use_vae=conf.use_vae,
-        reg_loss=conf.loss.reg,
-        vae_beta=conf.beta
-    )
+    # prepare model (todo: put parameters in model config and load from_config?)
+    if conf.use_vae:
+        model = GT8FullVAE.from_pretrained(
+            conf.model,
+            specify_target_with_prefix=conf.specify_target_with_prefix,
+            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
+            generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+            reg_loss=conf.loss.reg,
+        )
+    else:
+        model = GT8NonVAE.from_pretrained(
+            conf.model,
+            specify_target_with_prefix=conf.specify_target_with_prefix,
+            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
+            generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+        )
     # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")
@@ -105,6 +111,7 @@ def main(timestamp: str):
         mode=Mode(conf.mode),
         cycle_loss=CycleLoss(conf.loss.cycle),
         auto_loss=AutoLoss(conf.loss.auto),
+        vae_beta=conf.beta,
         beta_n_cycle=conf.beta_n_cycle,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
