@@ -4,11 +4,11 @@ mlflow:
 
 seed: 0
 model: "t5-base"
-specify_target_with_prefix: False  # specify target either as a prefix to the encoder input, or with the decoder_start_token_id
+specify_target_with_prefix: True  # specify target either as a prefix to the encoder input, or with the decoder_start_token_id
 fast_dev_run: False
 
 # training
-mode: "both_unsup"
+mode: "t2g"
 epochs: 5
 lr: 1.0e-4
 lr_scheduler: "linear"  # can also be 'constant'
@@ -21,6 +21,7 @@ loss:
   cycle: "vae"  # 'vae' or 'regular', the text-to-graph/graph-to-text loss
   reg: "mmd"  # 'kl' for a regular VAE, 'mmd' for a MMD-VAE, the regularisation loss
 beta: 1.  # coefficient in front of the VAE regularisation loss (KL or MMD)
+beta_n_cycle: 4  # number of cycles for the beta-VAE schedule (-1 for regular VAE: constant beta=1)
 # -- specific to unsupervised
 generate_method: "greedy"  # 'greedy', 'sample', 'top_k'
 sample_noise_fun:  # which noise functions to sample from?

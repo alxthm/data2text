@@ -122,7 +122,6 @@ class GT8(T5PreTrainedModel):
         generate_graph_token_id: int,
         use_vae: bool,
         reg_loss: Optional[str] = None,
-        vae_beta: Optional[float] = None,
     ):
         super().__init__(config)
         self.model_dim = config.d_model
@@ -138,7 +137,6 @@ class GT8(T5PreTrainedModel):
             # the same T5 encoder, but augmented with variational parameters
             self.encoder = VariationalT5Encoder(encoder_config, self.shared)
             self.reg_loss_type = reg_loss
-            self.beta = vae_beta
         else:
             self.encoder = T5Stack(encoder_config, self.shared)
 
@@ -201,6 +199,7 @@ class GT8(T5PreTrainedModel):
         return_dict=None,
         target=None,
         vae_z=None,
+        beta=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
@@ -333,7 +332,7 @@ class GT8(T5PreTrainedModel):
                 # where reg_loss can be
                 #   - KL(q(z|x) || p(z)) (regular VAE)
                 #   - MMD(q(z) || p(z)) (MMD VAE)
-                loss = recon_loss + self.beta * reg_loss
+                loss = recon_loss + beta * reg_loss
             else:
                 loss = recon_loss
 
