@@ -306,7 +306,7 @@ class GT8Base(T5PreTrainedModel, ABC):
                 lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1)
             )
 
-            loss = self.get_total_loss(
+            loss, reg_loss = self.get_total_loss(
                 recon_loss=recon_loss, encoder_outputs=encoder_outputs
             )
 
@@ -485,6 +485,11 @@ class GT8Base(T5PreTrainedModel, ABC):
 
     @abstractmethod
     def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
+        """
+        Return (loss, reg_loss), with
+            - loss: the total loss (objective to minimize)
+            - reg_loss: the regularization loss (which can be None), e.g. KL div or MMD
+        """
         pass
 
 
@@ -497,7 +502,7 @@ class GT8NonVAE(GT8Base):
         return encoder_outputs.last_hidden_state
 
     def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
-        return recon_loss
+        return recon_loss, None
 
     def prepare_inputs_for_generation(
         self,
@@ -558,7 +563,7 @@ class GT8FullVAE(GT8Base):
         # where reg_loss can be
         #   - KL(q(z|x) || p(z)) (regular VAE)
         #   - MMD(q(z) || p(z)) (MMD VAE)
-        return recon_loss + self.beta * reg_loss
+        return recon_loss + self.beta * reg_loss, reg_loss
 
     def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
         # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
