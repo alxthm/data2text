@@ -569,7 +569,7 @@ class GT8FullVAE(GT8Base):
     def compute_reg_loss(self, q_phi: Optional[Normal], z: torch.Tensor):
         if q_phi is None:
             # CycleVAE loss dual: we are computing the second reconstruction term only (e.g. log p(y_hat|z)
-            # with previously computed z~q(z|y_hat)), we don't need the regularisation term
+            # with previously computed z~q(z|y_hat)), we remove the regularisation term
             return 0.0
 
         # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi

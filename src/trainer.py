@@ -176,6 +176,10 @@ class Seq2seqTrainer:
             target=target,
             encoder_outputs=encoder_outputs,
         )
+        # we call loss.backward() here to free GPU memory for the next steps
+        # -> computed gradients are kept in the leaf variables (the parameters)
+        # -> but the computational graph is removed elsewhere
+        self.accelerator.backward(outputs.loss)
         return outputs
 
     def compute_loss_unsup_non_vae(
@@ -197,15 +201,10 @@ class Seq2seqTrainer:
         g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
         t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
 
-        # total loss
-        loss = (
-            text_outputs.loss + graph_outputs.loss + g2t_outputs.loss + t2g_outputs.loss
-        )
         for out in [text_outputs, graph_outputs, g2t_outputs, t2g_outputs]:
             # since we have a non VAE model, reg_loss is None and loss=recon_loss
             assert out.reg_loss is None
-
-        return loss, {
+        return {
             "text": text_outputs,
             "graph": graph_outputs,
             "t2g": t2g_outputs,
@@ -226,10 +225,10 @@ class Seq2seqTrainer:
         t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
 
         # total loss
-        loss = (
-            text_outputs.loss + graph_outputs.loss + g2t_outputs.loss + t2g_outputs.loss
-        )
-        return loss, {
+        # loss = (
+        #     text_outputs.loss + graph_outputs.loss + g2t_outputs.loss + t2g_outputs.loss
+        # )
+        return {
             "text": text_outputs,
             "graph": graph_outputs,
             "t2g": t2g_outputs,
@@ -256,17 +255,17 @@ class Seq2seqTrainer:
         )
 
         # total loss
-        loss = (
-            text_outputs.loss
-            + graph_outputs.loss
-            # with the same z~q(z|y_hat)
-            + g2t_outputs.loss  # log p(x|z) - KL(q(z|y_hat) || p(z))
-            + g2t_outputs_bis.recon_loss  # log p(y_hat|z)
-            # idem, with the same z~q(z|x_hat)
-            + t2g_outputs.loss
-            + t2g_outputs_bis.recon_loss
-        )
-        return loss, {
+        # loss = (
+        #     text_outputs.loss
+        #     + graph_outputs.loss
+        #     # with the same z~q(z|y_hat)
+        #     + g2t_outputs.loss  # log p(x|z) - KL(q(z|y_hat) || p(z))
+        #     + g2t_outputs_bis.recon_loss  # log p(y_hat|z)
+        #     # idem, with the same z~q(z|x_hat)
+        #     + t2g_outputs.loss
+        #     + t2g_outputs_bis.recon_loss
+        # )
+        return {
             "text": text_outputs,
             "graph": graph_outputs,
             "t2g": t2g_outputs,
@@ -316,14 +315,12 @@ class Seq2seqTrainer:
                         label_ids=graph_ids,
                         target="graph",
                     )
-                    loss = outputs["t2g"].loss
                 elif self.mode == Mode.g2t:
                     outputs["g2t"] = self.teach_model_one_step(
                         input_ids=graph_ids,
                         label_ids=text_ids,
                         target="text",
                     )
-                    loss = outputs["g2t"].loss
                 elif self.mode == Mode.both_sup:
                     outputs["g2t"] = self.teach_model_one_step(
                         input_ids=graph_ids,
@@ -335,25 +332,24 @@ class Seq2seqTrainer:
                         label_ids=graph_ids,
                         target="graph",
                     )
-                    loss = outputs["g2t"].loss + outputs["t2g"].loss
                 elif self.mode == Mode.both_unsup:
                     # todo: make sure the predictions are correctly formatted, especially the attention mask
                     #   -> does it start with an unnecessary padding token?
                     if self.use_vae:
                         if self.vae_cycle_loss == CycleVAELoss.single:
-                            loss, outputs = self.compute_loss_unsup_vae_single(
+                            outputs = self.compute_loss_unsup_vae_single(
                                 text_ids=text_ids, graph_ids=graph_ids
                             )
                         elif self.vae_cycle_loss == CycleVAELoss.dual:
-                            loss, outputs = self.compute_loss_unsup_vae_single(
+                            outputs = self.compute_loss_unsup_vae_single(
                                 text_ids=text_ids, graph_ids=graph_ids
                             )
                     else:
-                        loss, outputs = self.compute_loss_unsup_non_vae(
+                        outputs = self.compute_loss_unsup_non_vae(
                             text_ids=text_ids, graph_ids=graph_ids
                         )
 
-                self.accelerator.backward(loss)
+                # loss.backward has already been called (in teach_model_one_step)
                 self.accelerator.clip_grad_norm_(
                     self.ddp_model.parameters(), self.max_grad_norm
                 )
