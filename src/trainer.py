@@ -380,7 +380,7 @@ class Seq2seqTrainer:
         # log vae_beta coeff if we have a VAE model
         model = self.accelerator.unwrap_model(self.ddp_model)
         if hasattr(model, "beta"):
-            metrics["beta_t"] = model.beta
+            metrics["train/beta_t"] = model.beta
 
         self.logger.log_metrics(metrics, step=global_step)
 
