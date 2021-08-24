@@ -72,7 +72,7 @@ class GT8ModelOutput(ModelOutput):
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
-    encoder_outputs: Optional[ModelOutput] = None  # used by CycleVAE with dual loss
+    vae_z: Optional[torch.FloatTensor] = None  # used by CycleVAE with dual loss
     recon_loss: Optional[torch.FloatTensor] = None
     reg_loss: Optional[torch.FloatTensor] = None
 
@@ -314,6 +314,7 @@ class GT8Base(T5PreTrainedModel, ABC):
             loss=loss,
             reg_loss=reg_loss,
             recon_loss=recon_loss,
+            vae_z=encoder_outputs.vae_z if "vae_z" in encoder_outputs else None,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
@@ -322,7 +323,6 @@ class GT8Base(T5PreTrainedModel, ABC):
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
-            encoder_outputs=encoder_outputs,
         )
 
     def _reorder_cache(self, past, beam_idx):
@@ -566,7 +566,12 @@ class GT8FullVAE(GT8Base):
         #   - MMD(q(z) || p(z)) (MMD VAE)
         return recon_loss + self.beta * reg_loss, reg_loss
 
-    def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
+    def compute_reg_loss(self, q_phi: Optional[Normal], z: torch.Tensor):
+        if q_phi is None:
+            # CycleVAE loss dual: we are computing the second reconstruction term only (e.g. log p(y_hat|z)
+            # with previously computed z~q(z|y_hat)), we don't need the regularisation term
+            return 0.0
+
         # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
         prior = Normal(
             loc=torch.zeros_like(q_phi.loc),

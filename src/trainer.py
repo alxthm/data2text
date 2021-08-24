@@ -130,7 +130,7 @@ class Seq2seqTrainer:
         input_ids: Optional[torch.Tensor],
         label_ids: torch.Tensor,
         target: str,
-        encoder_outputs: Optional[GT8ModelOutput] = None,
+        vae_z: Optional[torch.FloatTensor] = None,
     ) -> GT8ModelOutput:
         """
 
@@ -140,14 +140,14 @@ class Seq2seqTrainer:
             label_ids: label (ground truth graph/text as a tokenized sequence)
             target: 'text' or 'graph', depending on the format of label sequences. Will
                 determine the prefix to add to input_ids, or the token to specify to the decoder
-            encoder_outputs: (optional) from a previous training step
+            vae_z: (optional) from a previous training step
 
         Returns:
             loss
 
         """
-        att_mask_input = None
-        if input_ids is not None:
+        if vae_z is None:
+            # usual case
             model = self.accelerator.unwrap_model(self.ddp_model)
             if model.specify_target_with_prefix:
                 # add the prefix "generate graph/text" to the input
@@ -160,6 +160,11 @@ class Seq2seqTrainer:
                     max_seq_len=self.max_seq_length,
                 )
             att_mask_input = self.get_att_mask(input_ids)
+            encoder_outputs = None
+        else:
+            # instead of using input ids, we use vae_z already computed from some input_ids
+            att_mask_input = None
+            encoder_outputs = GT8ModelOutput(vae_z=vae_z)
 
         # todo: check if we need to set pad token ids to -100 in the labels,
         #  to ignore them when computing the loss
@@ -244,16 +249,10 @@ class Seq2seqTrainer:
         g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
         t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
         g2t_outputs_bis = self.teach_model_one_step(
-            None,
-            syn_graph_ids,
-            target="graph",
-            encoder_outputs=g2t_outputs.encoder_outputs,
+            None, syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_z
         )
         t2g_outputs_bis = self.teach_model_one_step(
-            None,
-            syn_text_ids,
-            target="text",
-            encoder_outputs=t2g_outputs.encoder_outputs,
+            None, syn_text_ids, target="text", vae_z=t2g_outputs.vae_z
         )
 
         # total loss

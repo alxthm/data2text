@@ -20,8 +20,7 @@ from src.utils import (
     mlflow_log_src_and_config,
     ModelSummary,
     Mode,
-    CycleLoss,
-    AutoLoss, CycleVAELoss,
+    CycleVAELoss,
 )
 
 
@@ -41,13 +40,17 @@ def main(timestamp: str):
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
     logging.info(OmegaConf.to_yaml(conf))
+    run_name = (
+        f"{timestamp}-{conf.mode}-{conf.model}"
+    )
+    if conf.use_vae:
+        run_name += f"-vae-{conf.vae.cycle_loss}"
+    else:
+        run_name += "regular"
 
     # seed everything
     seed_everything(conf.seed)
 
-    run_name = (
-        f"{timestamp}-{conf.mode}-{conf.model}-{conf.loss.auto}-{conf.loss.cycle}"
-    )
     logging.info(f"run_name: {run_name}\n")
     if use_loggers:
         tb_writer = SummaryWriter(log_dir=str(project_dir / f"models/{run_name}"))
