@@ -260,10 +260,10 @@ class Seq2seqTrainer:
         loss = (
             text_outputs.loss
             + graph_outputs.loss
-            # with the same z~q(z|y_noisy)
-            + g2t_outputs.loss  # log p(x|z) - KL(q(z|y_noisy) || p(z))
-            + g2t_outputs_bis.recon_loss  # log p(y_noisy|z)
-            # idem, with the same z~q(z|x_noisy)
+            # with the same z~q(z|y_hat)
+            + g2t_outputs.loss  # log p(x|z) - KL(q(z|y_hat) || p(z))
+            + g2t_outputs_bis.recon_loss  # log p(y_hat|z)
+            # idem, with the same z~q(z|x_hat)
             + t2g_outputs.loss
             + t2g_outputs_bis.recon_loss
         )
