@@ -93,7 +93,6 @@ def main(timestamp: str):
         generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
         use_vae=conf.use_vae,
         reg_loss=conf.loss.reg,
-        vae_beta=conf.beta
     )
     # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))
@@ -105,6 +104,7 @@ def main(timestamp: str):
         mode=Mode(conf.mode),
         cycle_loss=CycleLoss(conf.loss.cycle),
         auto_loss=AutoLoss(conf.loss.auto),
+        vae_beta=conf.beta,
         beta_n_cycle=conf.beta_n_cycle,
         tokenizer=tokenizer,
         train_dataset=train_dataset,

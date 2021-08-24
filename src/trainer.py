@@ -22,7 +22,6 @@ from src.eval.evaluator import EvaluatorWebNLG
 from src.utils import MyLogger, Mode, AutoLoss, CycleLoss, frange_cycle_zero_linear
 
 
-
 class Seq2seqTrainer:
     # to be set after trainer init (we need to create Trainer with accelerator first)
     evaluator: EvaluatorWebNLG
@@ -33,6 +32,7 @@ class Seq2seqTrainer:
         mode: Mode,
         cycle_loss: str,
         auto_loss: str,
+        vae_beta: float,
         beta_n_cycle: int,
         tokenizer: PreTrainedTokenizer,
         train_dataset: Seq2seqDataset,
@@ -87,11 +87,11 @@ class Seq2seqTrainer:
         self.max_grad_norm = max_grad_norm
         self.noise_functions = noise_fn
         self.generate_method = generate_method
-        self.use_cyclical_beta_schedule = (beta_n_cycle  == -1)
+        self.use_cyclical_beta_schedule = beta_n_cycle > -1
         if self.use_cyclical_beta_schedule:
             self.betas = frange_cycle_zero_linear(self.num_training_steps, beta_n_cycle)
         else:
-            self.beta = 1
+            self.beta = vae_beta
 
         # logging
         self.log_path = log_path
