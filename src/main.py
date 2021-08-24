@@ -21,7 +21,7 @@ from src.utils import (
     ModelSummary,
     Mode,
     CycleLoss,
-    AutoLoss,
+    AutoLoss, CycleVAELoss,
 )
 
 
@@ -40,7 +40,6 @@ def main(timestamp: str):
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
-    conf.use_vae = conf.loss.cycle == "vae"
     logging.info(OmegaConf.to_yaml(conf))
 
     # seed everything
@@ -92,7 +91,7 @@ def main(timestamp: str):
             specify_target_with_prefix=conf.specify_target_with_prefix,
             generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
             generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
-            reg_loss=conf.loss.reg,
+            reg_loss=conf.vae.reg,
         )
     else:
         model = GT8NonVAE.from_pretrained(
@@ -109,10 +108,9 @@ def main(timestamp: str):
     trainer = Seq2seqTrainer(
         model=model,
         mode=Mode(conf.mode),
-        cycle_loss=CycleLoss(conf.loss.cycle),
-        auto_loss=AutoLoss(conf.loss.auto),
-        vae_beta=conf.beta,
-        beta_n_cycle=conf.beta_n_cycle,
+        vae_cycle_loss=CycleVAELoss(conf.vae.cycle_loss),
+        vae_beta=conf.vae.beta,
+        beta_n_cycle=conf.vae.beta_n_cycle,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         accelerator=accelerator,
