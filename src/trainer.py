@@ -179,6 +179,8 @@ class Seq2seqTrainer:
         # we call loss.backward() here to free GPU memory for the next steps
         # -> computed gradients are kept in the leaf variables (the parameters)
         # -> but the computational graph is removed elsewhere
+        # -> equivalent to calling backward on the sum of the losses, since gradients
+        #   are added until we call .zero_grad()
         self.accelerator.backward(outputs.loss)
         return outputs
 
