@@ -280,7 +280,9 @@ class Seq2seqTrainer:
             "text": text_outputs,
             "graph": graph_outputs,
             "t2g": t2g_outputs,
+            "t2g_bis": t2g_outputs_bis,
             "g2t": g2t_outputs,
+            "g2t_bis": g2t_outputs_bis,
         }
 
     def train(self):
@@ -308,7 +310,6 @@ class Seq2seqTrainer:
                 assert (att_mask_text == self.get_att_mask(text_ids)).all()
 
                 # training step
-                loss = 0.0
                 outputs = {}
                 syn_text_ids = None  # synthetic text and graphs
                 syn_graph_ids = None
@@ -433,15 +434,14 @@ class Seq2seqTrainer:
             "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
             "train/epoch": epoch,
         }
-        for m in ["t2g", "g2t", "text", "graph"]:
-            # for each mode, log our regular and vae metrics
-            if model_outputs.get(m, None) is not None:
-                outputs = model_outputs[m]
-                metrics[f"train/loss_{m}"] = outputs.loss.item()
-                if "recon_loss" in outputs:
-                    metrics[f"train/recon_loss_{m}"] = outputs.recon_loss.item()
-                if "reg_loss" in outputs:
-                    metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
+        for mode, outputs in model_outputs.items():
+            # for each mode (t2g, g2t, text, ...), log our regular and vae metrics
+            outputs = model_outputs[mode]
+            metrics[f"train/loss_{mode}"] = outputs.loss.item()
+            if "recon_loss" in outputs:
+                metrics[f"train/recon_loss_{mode}"] = outputs.recon_loss.item()
+            if "reg_loss" in outputs:
+                metrics[f"train/reg_loss_{mode}"] = outputs.reg_loss.item()
 
         # log vae_beta coeff if we have a VAE model
         model = self.accelerator.unwrap_model(self.ddp_model)
