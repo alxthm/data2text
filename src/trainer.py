@@ -1,7 +1,7 @@
 import logging
 import random
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -19,7 +19,8 @@ from src.data.datasets import Seq2seqDataset
 from src.data.formatting import add_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
-from src.utils import MyLogger, Mode, AutoLoss, CycleLoss, frange_cycle_zero_linear
+from src.model import GT8ModelOutput, GT8FullVAE, VariationalT5EncoderOutput
+from src.utils import MyLogger, Mode, frange_cycle_zero_linear, CycleVAELoss
 
 
 class Seq2seqTrainer:
@@ -30,8 +31,7 @@ class Seq2seqTrainer:
         self,
         model,
         mode: Mode,
-        cycle_loss: str,
-        auto_loss: str,
+        vae_cycle_loss: CycleVAELoss,
         vae_beta: float,
         beta_n_cycle: int,
         tokenizer: PreTrainedTokenizer,
@@ -50,8 +50,6 @@ class Seq2seqTrainer:
         max_training_steps: int = -1,
     ):
         self.mode = mode
-        self.cycle_loss = cycle_loss
-        self.auto_loss = auto_loss
         self.tokenizer = tokenizer
 
         # training
@@ -90,12 +88,16 @@ class Seq2seqTrainer:
         self.max_grad_norm = max_grad_norm
         self.noise_functions = noise_fn
         self.generate_method = generate_method
-        self.use_cyclical_beta_schedule = beta_n_cycle > -1
-        if self.use_cyclical_beta_schedule:
-            self.betas = frange_cycle_zero_linear(num_training_steps, beta_n_cycle)
-        else:
-            # constant beta coefficient -> specify once to the model
-            model.beta = vae_beta
+        # VAE specific code
+        self.use_vae = isinstance(model, GT8FullVAE)
+        if self.use_vae:
+            self.vae_cycle_loss = vae_cycle_loss
+            self.use_cyclical_beta_schedule = beta_n_cycle > -1
+            if self.use_cyclical_beta_schedule:
+                self.betas = frange_cycle_zero_linear(num_training_steps, beta_n_cycle)
+            else:
+                # constant beta coefficient -> specify once to the model
+                model.beta = vae_beta
 
         # logging
         self.log_path = log_path
@@ -124,32 +126,49 @@ class Seq2seqTrainer:
         return prediction_ids
 
     def teach_model_one_step(
-        self, input_ids: torch.Tensor, label_ids: torch.Tensor, target: str
-    ):
+        self,
+        input_ids: Optional[torch.Tensor],
+        label_ids: torch.Tensor,
+        target: str,
+        vae_z: Optional[torch.FloatTensor] = None,
+        retain_graph: bool = False,
+    ) -> GT8ModelOutput:
         """
+        Run a forward pass in the model using input_ids, and backward the loss wrt label_ids.
+        If necessary, append prefix to input_ids (to specify text/graph target).
 
         Args:
-            input_ids: input sequence (text/graph tokenized batch, already on device)
+            input_ids: input sequence (text/graph tokenized batch, already on device).
+                Should be None if encoder_outputs is given.
             label_ids: label (ground truth graph/text as a tokenized sequence)
             target: 'text' or 'graph', depending on the format of label sequences. Will
                 determine the prefix to add to input_ids, or the token to specify to the decoder
+            vae_z: (optional) from a previous training step
+            retain_graph: passed to the backward
 
         Returns:
-            loss
+            model_outputs
 
         """
-        model = self.accelerator.unwrap_model(self.ddp_model)
-        if model.specify_target_with_prefix:
-            # add the prefix "generate graph/text" to the input
-            # (if model.specify_target_with_prefix=False, the model handles this itself
-            # and uses the right decoder_start_token_id in the forward)
-            input_ids = add_prefix(
-                input_ids=input_ids,
-                target=target,
-                tokenizer=self.tokenizer,
-                max_seq_len=self.max_seq_length,
-            )
-        att_mask_input = self.get_att_mask(input_ids)
+        if vae_z is None:
+            # usual case
+            model = self.accelerator.unwrap_model(self.ddp_model)
+            if model.specify_target_with_prefix:
+                # add the prefix "generate graph/text" to the input
+                # (if model.specify_target_with_prefix=False, the model handles this itself
+                # and uses the right decoder_start_token_id in the forward)
+                input_ids = add_prefix(
+                    input_ids=input_ids,
+                    target=target,
+                    tokenizer=self.tokenizer,
+                    max_seq_len=self.max_seq_length,
+                )
+            att_mask_input = self.get_att_mask(input_ids)
+            encoder_outputs = None
+        else:
+            # instead of using input ids, we use vae_z already computed from some input_ids
+            att_mask_input = None
+            encoder_outputs = VariationalT5EncoderOutput(vae_z=vae_z)
 
         # todo: check if we need to set pad token ids to -100 in the labels,
         #  to ignore them when computing the loss
@@ -159,10 +178,112 @@ class Seq2seqTrainer:
             attention_mask=att_mask_input,
             labels=label_ids,
             target=target,
+            encoder_outputs=encoder_outputs,
         )
-        loss = outputs.loss
-        self.accelerator.backward(loss)
+        # we call loss.backward() here to free GPU memory for the next steps
+        # -> computed gradients are kept in the leaf variables (the parameters)
+        # -> but the computational graph is removed elsewhere
+        # -> equivalent to calling backward on the sum of the losses, since gradients
+        #   are added until we call .zero_grad()
+        self.accelerator.backward(outputs.loss, retain_graph=retain_graph)
         return outputs
+
+    def compute_loss_unsup_non_vae(
+        self, text_ids: torch.Tensor, graph_ids: torch.Tensor
+    ):
+        # -- auto loss (denoising auto-encoding)
+        noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
+        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=False)
+        text_outputs = self.teach_model_one_step(
+            noisy_text_ids, text_ids, target="text"
+        )
+        graph_outputs = self.teach_model_one_step(
+            noisy_graph_ids, graph_ids, target="graph"
+        )
+
+        # -- cycle loss
+        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
+        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+        g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
+        t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
+
+        for out in [text_outputs, graph_outputs, g2t_outputs, t2g_outputs]:
+            # since we have a non VAE model, reg_loss is None and loss=recon_loss
+            assert out.reg_loss is None
+        return {
+            "text": text_outputs,
+            "graph": graph_outputs,
+            "t2g": t2g_outputs,
+            "g2t": g2t_outputs,
+        }
+
+    def compute_loss_unsup_vae_single(
+        self, text_ids: torch.Tensor, graph_ids: torch.Tensor
+    ):
+        # -- auto loss (regular VAE)
+        text_outputs = self.teach_model_one_step(text_ids, text_ids, target="text")
+        graph_outputs = self.teach_model_one_step(graph_ids, graph_ids, target="graph")
+
+        # -- cycle loss (single)
+        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
+        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+        g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
+        t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
+
+        # total loss
+        # loss = (
+        #     text_outputs.loss + graph_outputs.loss + g2t_outputs.loss + t2g_outputs.loss
+        # )
+        return {
+            "text": text_outputs,
+            "graph": graph_outputs,
+            "t2g": t2g_outputs,
+            "g2t": g2t_outputs,
+        }
+
+    def compute_loss_unsup_vae_dual(
+        self, text_ids: torch.Tensor, graph_ids: torch.Tensor
+    ):
+        # -- auto loss (regular VAE)
+        text_outputs = self.teach_model_one_step(text_ids, text_ids, target="text")
+        graph_outputs = self.teach_model_one_step(graph_ids, graph_ids, target="graph")
+
+        # -- cycle loss (dual)
+        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
+        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+        # we need retain_graph=True since in the next step we'll backward through vae_z again
+        g2t_outputs = self.teach_model_one_step(
+            syn_graph_ids, text_ids, target="text", retain_graph=True
+        )
+        g2t_outputs_bis = self.teach_model_one_step(
+            None, syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_z
+        )
+        t2g_outputs = self.teach_model_one_step(
+            syn_text_ids, graph_ids, target="graph", retain_graph=True
+        )
+        t2g_outputs_bis = self.teach_model_one_step(
+            None, syn_text_ids, target="text", vae_z=t2g_outputs.vae_z
+        )
+
+        # total loss
+        # loss = (
+        #     text_outputs.loss
+        #     + graph_outputs.loss
+        #     # with the same z~q(z|y_hat)
+        #     + g2t_outputs.loss  # log p(x|z) - KL(q(z|y_hat) || p(z))
+        #     + g2t_outputs_bis.recon_loss  # log p(y_hat|z)
+        #     # idem, with the same z~q(z|x_hat)
+        #     + t2g_outputs.loss
+        #     + t2g_outputs_bis.recon_loss
+        # )
+        return {
+            "text": text_outputs,
+            "graph": graph_outputs,
+            "t2g": t2g_outputs,
+            "t2g_bis": t2g_outputs_bis,
+            "g2t": g2t_outputs,
+            "g2t_bis": g2t_outputs_bis,
+        }
 
     def train(self):
         global_step = 0
@@ -189,39 +310,36 @@ class Seq2seqTrainer:
                 assert (att_mask_text == self.get_att_mask(text_ids)).all()
 
                 # training step
-                t2g_outputs = None
-                g2t_outputs = None
-                text_outputs = None
-                graph_outputs = None
+                outputs = {}
                 syn_text_ids = None  # synthetic text and graphs
                 syn_graph_ids = None
                 noisy_text_ids = None
                 noisy_graph_ids = None
 
                 # select beta
-                if self.use_cyclical_beta_schedule:
+                if self.use_vae and self.use_cyclical_beta_schedule:
                     model = self.accelerator.unwrap_model(self.ddp_model)
                     model.beta = self.betas[global_step]
 
                 if self.mode == Mode.t2g:
-                    t2g_outputs = self.teach_model_one_step(
+                    outputs["t2g"] = self.teach_model_one_step(
                         input_ids=text_ids,
                         label_ids=graph_ids,
                         target="graph",
                     )
                 elif self.mode == Mode.g2t:
-                    g2t_outputs = self.teach_model_one_step(
+                    outputs["g2t"] = self.teach_model_one_step(
                         input_ids=graph_ids,
                         label_ids=text_ids,
                         target="text",
                     )
                 elif self.mode == Mode.both_sup:
-                    g2t_outputs = self.teach_model_one_step(
+                    outputs["g2t"] = self.teach_model_one_step(
                         input_ids=graph_ids,
                         label_ids=text_ids,
                         target="text",
                     )
-                    t2g_outputs = self.teach_model_one_step(
+                    outputs["t2g"] = self.teach_model_one_step(
                         input_ids=text_ids,
                         label_ids=graph_ids,
                         target="graph",
@@ -229,62 +347,21 @@ class Seq2seqTrainer:
                 elif self.mode == Mode.both_unsup:
                     # todo: make sure the predictions are correctly formatted, especially the attention mask
                     #   -> does it start with an unnecessary padding token?
-                    #   -> should we hide the prefix ("Generate graph/text:") to the encoder in the input?
-
-                    if self.auto_loss == AutoLoss.denoising:
-                        # text denoising auto-encoder step
-                        noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
-                        text_outputs = self.teach_model_one_step(
-                            input_ids=noisy_text_ids,
-                            label_ids=text_ids,
-                            target="text",
-                        )
-                        # graph denoising auto-encoder step
-                        noisy_graph_ids = self.get_noisy_inputs(
-                            graph_ids, is_graph=False
-                        )
-                        graph_outputs = self.teach_model_one_step(
-                            input_ids=noisy_graph_ids,
-                            label_ids=graph_ids,
-                            target="graph",
-                        )
-                    elif self.auto_loss == AutoLoss.vae:
-                        text_outputs = self.teach_model_one_step(
-                            input_ids=text_ids,
-                            label_ids=text_ids,
-                            target="text",
-                        )
-                        graph_outputs = self.teach_model_one_step(
-                            input_ids=graph_ids,
-                            label_ids=graph_ids,
-                            target="graph",
-                        )
+                    if self.use_vae:
+                        if self.vae_cycle_loss == CycleVAELoss.single:
+                            outputs = self.compute_loss_unsup_vae_single(
+                                text_ids=text_ids, graph_ids=graph_ids
+                            )
+                        elif self.vae_cycle_loss == CycleVAELoss.dual:
+                            outputs = self.compute_loss_unsup_vae_dual(
+                                text_ids=text_ids, graph_ids=graph_ids
+                            )
                     else:
-                        raise ValueError
-
-                    if (
-                        self.cycle_loss == CycleLoss.regular
-                        or self.cycle_loss == CycleLoss.vae
-                    ):
-                        # g2t unsupervised step
-                        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
-                        g2t_outputs = self.teach_model_one_step(
-                            input_ids=syn_graph_ids,
-                            label_ids=text_ids,
-                            target="text",
+                        outputs = self.compute_loss_unsup_non_vae(
+                            text_ids=text_ids, graph_ids=graph_ids
                         )
-                        # t2g unsupervised step
-                        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
-                        t2g_outputs = self.teach_model_one_step(
-                            input_ids=syn_text_ids,
-                            label_ids=graph_ids,
-                            target="graph",
-                        )
-                    else:
-                        raise ValueError
-                else:
-                    raise ValueError
 
+                # loss.backward has already been called (in teach_model_one_step)
                 self.accelerator.clip_grad_norm_(
                     self.ddp_model.parameters(), self.max_grad_norm
                 )
@@ -294,14 +371,7 @@ class Seq2seqTrainer:
                 global_step += 1
 
                 # log training info (metrics and text sequences)
-                self.log_metrics(
-                    global_step,
-                    epoch,
-                    t2g_outputs=t2g_outputs,
-                    g2t_outputs=g2t_outputs,
-                    text_outputs=text_outputs,
-                    graph_outputs=graph_outputs,
-                )
+                self.log_metrics(global_step, epoch, model_outputs=outputs)
                 self.log_training_samples(
                     global_step,
                     epoch,
@@ -311,15 +381,12 @@ class Seq2seqTrainer:
                     syn_graph_ids=syn_graph_ids,
                     noisy_text_ids=noisy_text_ids,
                     noisy_graph_ids=noisy_graph_ids,
-                    t2g_logits=t2g_outputs.logits if t2g_outputs else None,
-                    g2t_logits=g2t_outputs.logits if g2t_outputs else None,
+                    t2g_logits=outputs["t2g"].logits if "t2g" in outputs else None,
+                    g2t_logits=outputs["g2t"].logits if "g2t" in outputs else None,
                 )
 
             # free GPU memory before eval
-            t2g_outputs = None
-            g2t_outputs = None
-            text_outputs = None
-            graph_outputs = None
+            outputs = {}
             # evaluate after each epoch (and save model checkpoint if necessary)
             self.evaluator.on_epoch_end(epoch)
             self.logger.send_current_logs()
@@ -362,20 +429,19 @@ class Seq2seqTrainer:
         noisy_ids = batch_encoding.input_ids
         return noisy_ids
 
-    def log_metrics(self, global_step: int, epoch: int, **kwargs):
+    def log_metrics(self, global_step: int, epoch: int, model_outputs: dict):
         metrics = {
             "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
             "train/epoch": epoch,
         }
-        for m in ["t2g", "g2t", "text", "graph"]:
-            # for each mode, log our regular and vae metrics
-            if kwargs.get(f"{m}_outputs", None) is not None:
-                outputs = kwargs[f"{m}_outputs"]
-                metrics[f"train/loss_{m}"] = outputs.loss.item()
-                if "recon_loss" in outputs:
-                    metrics[f"train/recon_loss_{m}"] = outputs.recon_loss.item()
-                if "reg_loss" in outputs:
-                    metrics[f"train/reg_loss_{m}"] = outputs.reg_loss.item()
+        for mode, outputs in model_outputs.items():
+            # for each mode (t2g, g2t, text, ...), log our regular and vae metrics
+            outputs = model_outputs[mode]
+            metrics[f"train/loss_{mode}"] = outputs.loss.item()
+            if "recon_loss" in outputs:
+                metrics[f"train/recon_loss_{mode}"] = outputs.recon_loss.item()
+            if "reg_loss" in outputs:
+                metrics[f"train/reg_loss_{mode}"] = outputs.reg_loss.item()
 
         # log vae_beta coeff if we have a VAE model
         model = self.accelerator.unwrap_model(self.ddp_model)

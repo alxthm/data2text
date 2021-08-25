@@ -21,17 +21,19 @@ class Mode(Enum):
     g2t = "g2t"
     both_sup = "both_sup"
     both_unsup = "both_unsup"
-    both_vae = "both_vae"
 
 
-class AutoLoss(Enum):
-    vae = "vae"
-    denoising = "denoising"
+class CycleVAELoss(Enum):
+    """
+    Which Cycle loss to use with a VAE model, in addition (or after) the vanilla VAE loss
+    """
 
-
-class CycleLoss(Enum):
-    vae = "vae"
-    regular = "regular"
+    # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z)]
+    #                   - KL(q(z|y_noisy) || p(z))
+    single = "single"
+    # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z) + log p(y_noisy|z)]
+    #                   - KL(q(z|y_noisy) || p(z))
+    dual = "dual"
 
 
 class WarningsFilter:

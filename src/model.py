@@ -11,12 +11,10 @@ from torch.nn import CrossEntropyLoss
 from transformers import T5PreTrainedModel, PreTrainedTokenizer, T5Config
 from transformers.file_utils import ModelOutput
 from transformers.modeling_outputs import (
-    BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
 )
 from transformers.models.t5.modeling_t5 import T5Stack
 from transformers.utils import logging
-from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
 
 from src.data.formatting import add_prefix
 
@@ -74,6 +72,7 @@ class GT8ModelOutput(ModelOutput):
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
+    vae_z: Optional[torch.FloatTensor] = None  # used by CycleVAE with dual loss
     recon_loss: Optional[torch.FloatTensor] = None
     reg_loss: Optional[torch.FloatTensor] = None
 
@@ -240,7 +239,8 @@ class GT8Base(T5PreTrainedModel, ABC):
                 warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
                 decoder_head_mask = head_mask
 
-        # Encode if needed (training)
+        # Encode if needed (training). Note: even in training, in some cases we might
+        # want to re-use the same encoder_outputs (CycleVAE dual loss)
         if encoder_outputs is None:
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
@@ -314,6 +314,7 @@ class GT8Base(T5PreTrainedModel, ABC):
             loss=loss,
             reg_loss=reg_loss,
             recon_loss=recon_loss,
+            vae_z=encoder_outputs.vae_z if "vae_z" in encoder_outputs else None,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
@@ -565,7 +566,12 @@ class GT8FullVAE(GT8Base):
         #   - MMD(q(z) || p(z)) (MMD VAE)
         return recon_loss + self.beta * reg_loss, reg_loss
 
-    def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
+    def compute_reg_loss(self, q_phi: Optional[Normal], z: torch.Tensor):
+        if q_phi is None:
+            # CycleVAE loss dual: we are computing the second reconstruction term only (e.g. log p(y_hat|z)
+            # with previously computed z~q(z|y_hat)), we remove the regularisation term
+            return 0.0
+
         # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
         prior = Normal(
             loc=torch.zeros_like(q_phi.loc),
