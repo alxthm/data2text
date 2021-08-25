@@ -14,14 +14,13 @@ lr: 1.0e-4
 lr_scheduler: "linear"  # can also be 'constant'
 batch_size_train: 4
 max_grad_norm: 1.0
-# -- specific to VAE (only used if loss.cycle == 'vae')
-loss:
-  # in mode both_unsup, which loss to use?
-  auto: "vae"  # 'vae' or 'denoising', the text-to-text/graph-to-graph loss
-  cycle: "vae"  # 'vae' or 'regular', the text-to-graph/graph-to-text loss
+# -- specific to VAE
+use_vae: True
+vae:
+  cycle_loss: "dual"  # 'single' or 'dual', the cycle VAE loss
   reg: "mmd"  # 'kl' for a regular VAE, 'mmd' for a MMD-VAE, the regularisation loss
-beta: 1.  # coefficient in front of the VAE regularisation loss (KL or MMD)
-beta_n_cycle: 4  # number of cycles for the beta-VAE schedule (-1 for regular VAE: constant beta=1)
+  beta: 10.  # coefficient in front of the VAE regularisation loss (KL or MMD)
+  beta_n_cycle: -1  # number of cycles for the beta-VAE schedule (-1 for regular VAE: constant beta=1)
 # -- specific to unsupervised
 generate_method: "greedy"  # 'greedy', 'sample', 'top_k'
 sample_noise_fun:  # which noise functions to sample from?
