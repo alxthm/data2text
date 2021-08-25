@@ -19,7 +19,7 @@ from src.data.datasets import Seq2seqDataset
 from src.data.formatting import add_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
-from src.model import GT8ModelOutput, GT8FullVAE
+from src.model import GT8ModelOutput, GT8FullVAE, VariationalT5EncoderOutput
 from src.utils import MyLogger, Mode, frange_cycle_zero_linear, CycleVAELoss
 
 
@@ -131,8 +131,11 @@ class Seq2seqTrainer:
         label_ids: torch.Tensor,
         target: str,
         vae_z: Optional[torch.FloatTensor] = None,
+        retain_graph: bool = False,
     ) -> GT8ModelOutput:
         """
+        Run a forward pass in the model using input_ids, and backward the loss wrt label_ids.
+        If necessary, append prefix to input_ids (to specify text/graph target).
 
         Args:
             input_ids: input sequence (text/graph tokenized batch, already on device).
@@ -141,9 +144,10 @@ class Seq2seqTrainer:
             target: 'text' or 'graph', depending on the format of label sequences. Will
                 determine the prefix to add to input_ids, or the token to specify to the decoder
             vae_z: (optional) from a previous training step
+            retain_graph: passed to the backward
 
         Returns:
-            loss
+            model_outputs
 
         """
         if vae_z is None:
@@ -164,7 +168,7 @@ class Seq2seqTrainer:
         else:
             # instead of using input ids, we use vae_z already computed from some input_ids
             att_mask_input = None
-            encoder_outputs = GT8ModelOutput(vae_z=vae_z)
+            encoder_outputs = VariationalT5EncoderOutput(vae_z=vae_z)
 
         # todo: check if we need to set pad token ids to -100 in the labels,
         #  to ignore them when computing the loss
@@ -181,7 +185,7 @@ class Seq2seqTrainer:
         # -> but the computational graph is removed elsewhere
         # -> equivalent to calling backward on the sum of the losses, since gradients
         #   are added until we call .zero_grad()
-        self.accelerator.backward(outputs.loss)
+        self.accelerator.backward(outputs.loss, retain_graph=retain_graph)
         return outputs
 
     def compute_loss_unsup_non_vae(
@@ -247,10 +251,15 @@ class Seq2seqTrainer:
         # -- cycle loss (dual)
         syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
         syn_text_ids = self.predict(input_ids=graph_ids, target="text")
-        g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
-        t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
+        # we need retain_graph=True since in the next step we'll backward through vae_z again
+        g2t_outputs = self.teach_model_one_step(
+            syn_graph_ids, text_ids, target="text", retain_graph=True
+        )
         g2t_outputs_bis = self.teach_model_one_step(
             None, syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_z
+        )
+        t2g_outputs = self.teach_model_one_step(
+            syn_text_ids, graph_ids, target="graph", retain_graph=True
         )
         t2g_outputs_bis = self.teach_model_one_step(
             None, syn_text_ids, target="text", vae_z=t2g_outputs.vae_z
@@ -343,7 +352,7 @@ class Seq2seqTrainer:
                                 text_ids=text_ids, graph_ids=graph_ids
                             )
                         elif self.vae_cycle_loss == CycleVAELoss.dual:
-                            outputs = self.compute_loss_unsup_vae_single(
+                            outputs = self.compute_loss_unsup_vae_dual(
                                 text_ids=text_ids, graph_ids=graph_ids
                             )
                     else:
