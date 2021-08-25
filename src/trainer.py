@@ -440,7 +440,7 @@ class Seq2seqTrainer:
             metrics[f"train/loss_{mode}"] = outputs.loss.item()
             if "recon_loss" in outputs:
                 metrics[f"train/recon_loss_{mode}"] = outputs.recon_loss.item()
-            if "reg_loss" in outputs:
+            if "reg_loss" in outputs and isinstance(outputs.reg_loss, torch.Tensor):
                 metrics[f"train/reg_loss_{mode}"] = outputs.reg_loss.item()
 
         # log vae_beta coeff if we have a VAE model
