@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import mlflow
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
@@ -26,23 +26,32 @@ from src.utils import (
 
 
 def main(timestamp: str):
+    # Load config
+    project_dir = Path(__file__).resolve().parents[1]
+    conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+
     # multi-GPU handler
-    accelerator = Accelerator()
+    vae_model = VAEModel(conf.vae.model)
+    accelerator_kwargs = []
+    if vae_model == VAEModel.style_vae:
+        # for the StyleVAE, we don't use all parameters before each backward call (since we compute
+        # either vae_s_x or vae_s_y), so this is necessary (https://pytorch.org/docs/stable/notes/ddp.html)
+        accelerator_kwargs = [DistributedDataParallelKwargs(find_unused_parameters=True)]
+    accelerator = Accelerator(kwargs_handlers=accelerator_kwargs)
+
+    # format logging
     logging.basicConfig(
         format="%(process)d %(asctime)s %(message)s",
         datefmt="[%H:%M:%S]",
         level=logging.INFO if accelerator.is_local_main_process else logging.ERROR,
     )
 
-    # Load config
-    project_dir = Path(__file__).resolve().parents[1]
-    conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+    # complete and print conf, with a specific run name
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
     logging.info(OmegaConf.to_yaml(conf))
     run_name = f"{timestamp}-{conf.mode}-{conf.model}-{conf.vae.model}"
-    vae_model = VAEModel(conf.vae.model)
     if vae_model == VAEModel.full_vae:
         run_name += f"-{conf.vae.cycle_loss}"
 
