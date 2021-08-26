@@ -16,7 +16,7 @@ from transformers.modeling_outputs import (
 from transformers.models.t5.modeling_t5 import T5Stack
 from transformers.utils import logging
 
-from src.data.formatting import add_prefix
+from src.data.formatting import add_target_prefix
 
 logger = logging.get_logger(__name__)
 # Warning message for FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
@@ -109,6 +109,190 @@ class VariationalT5Encoder(T5Stack):
         )
 
 
+class StyleVAET5Encoder(T5Stack):
+    def __init__(self, config: T5Config, embed_tokens: nn.Embedding = None):
+        super().__init__(config, embed_tokens)
+
+        # additional layers for the variational posterior of x, q(s_x|x)
+        model_dim = config.d_model
+        self.mu_s_x = nn.Linear(model_dim, model_dim)
+        self.log_sigma_s_x = nn.Linear(model_dim, model_dim)
+        # and for q(s_y|y)
+        self.mu_s_y = nn.Linear(model_dim, model_dim)
+        self.log_sigma_s_y = nn.Linear(model_dim, model_dim)
+
+    def forward(self, *args, **kwargs):
+        # get input format (and raise an error if we are missing this argument)
+        source_format = kwargs.pop("source")
+
+        # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
+        assert kwargs["return_dict"]
+        encoder_outputs = super().forward(*args, **kwargs)  # (N, T, dim)
+
+        # representation of our special [STYLE] token, after encoding
+        style_hidden_state = encoder_outputs.last_hidden_state[:, 0, :].clone()
+        if source_format == "text":
+            mu_s = self.mu_s_x(style_hidden_state)
+            log_sigma_s = self.log_sigma_s_x(style_hidden_state)
+        elif source_format == "graph":
+            mu_s = self.mu_s_y(style_hidden_state)
+            log_sigma_s = self.log_sigma_s_y(style_hidden_state)
+        else:
+            raise ValueError
+
+        # variational posterior, and latent variable
+        q_phi = Normal(loc=mu_s, scale=torch.exp(log_sigma_s))
+        vae_s = q_phi.rsample()  # same dimension as mu (N, T, model_dim)
+
+        return VariationalT5EncoderOutput(
+            last_hidden_state=encoder_outputs.last_hidden_state,
+            past_key_values=encoder_outputs.past_key_values,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+            cross_attentions=encoder_outputs.cross_attentions,
+            q_phi=q_phi,
+            vae_z=vae_s,
+        )
+
+
+class VAEBase(ABC):
+    beta: float  # to be specified by Trainer, before calling model forward
+    reg_loss_type: str  # to be specified during init
+
+    def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
+        # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
+        prior = Normal(
+            loc=torch.zeros_like(q_phi.loc),
+            scale=torch.ones_like(q_phi.scale),
+        )
+
+        if self.reg_loss_type == "kl":
+            # (N, T, dim_z) as well, since kl_divergence on Normal distributions does not reduce result
+            kl_div = kl_divergence(q_phi, prior)
+            # reduce to a scalar by:
+            #   - summing over latent dim, to obtain the D_KL between multivariate Normal distributions
+            #   - taking the mean over batch and sequence dim, to match the
+            #       CrossEntropyLoss (which takes mean over N and T as well)
+            kl_div = kl_div.sum(dim=2).mean()
+            return kl_div
+        elif self.reg_loss_type == "mmd":
+            # https://github.com/amir-abdi/disentanglement-pytorch/blob/master/models/infovae.py
+            z_prior = prior.rsample()
+            mmd = self.compute_mmd(z, z_prior)
+            return mmd
+        else:
+            raise ValueError
+
+    # MMD-VAE specific methods
+    @staticmethod
+    @abstractmethod
+    def compute_kernel(x: torch.Tensor, y: torch.Tensor) -> torch.FloatTensor:
+        pass
+
+    def compute_mmd(self, x: torch.Tensor, y: torch.Tensor):
+        # original implementation: https://ermongroup.github.io/blog/a-tutorial-on-mmd-variational-autoencoders/
+        x_kernel = self.compute_kernel(x, x)
+        y_kernel = self.compute_kernel(y, y)
+        xy_kernel = self.compute_kernel(x, y)
+        # MMD = E[k(x,x)] + E[k(y,y)] - 2 * E[k(x,y)]
+        return torch.mean(x_kernel) + torch.mean(y_kernel) - 2 * torch.mean(xy_kernel)
+
+    # other methods, assuming latent variable is stored in encoder_outputs as vae_z
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past=None,
+        attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
+        use_cache=None,
+        encoder_outputs=None,
+        **kwargs,
+    ):
+        # cut decoder_input_ids if past is used
+        if past is not None:
+            input_ids = input_ids[:, -1:]
+
+        if "vae_z" in kwargs:
+            # use vae_z specified as a kwarg to the generate method
+            encoder_outputs.vae_z = kwargs["vae_z"]
+        else:
+            # take mu_z (but we could also sample)
+            encoder_outputs.vae_z = encoder_outputs.q_phi.loc
+
+        inputs = {
+            "decoder_input_ids": input_ids,
+            "past_key_values": past,
+            "encoder_outputs": encoder_outputs,
+            "attention_mask": attention_mask,
+            "head_mask": head_mask,
+            "decoder_head_mask": decoder_head_mask,
+            "cross_attn_head_mask": cross_attn_head_mask,
+            "use_cache": use_cache,
+        }
+        return inputs
+
+    @staticmethod
+    def _expand_inputs_for_generation(
+        input_ids: torch.LongTensor,
+        expand_size: int = 1,
+        is_encoder_decoder: bool = False,
+        attention_mask: torch.LongTensor = None,
+        encoder_outputs: VariationalT5EncoderOutput = None,
+        **model_kwargs,
+    ) -> Tuple[torch.LongTensor, Dict[str, Any]]:
+        """
+        Expand tensors across the batch dimension, e.g. to have num_beams*batch_size
+        instead of batch_size. Called during beam search generation for instance.
+
+        We redefine this function to also expand vae_mu_z/vae_sigma_z (in encoder_outputs).
+        """
+        expanded_return_idx = (
+            torch.arange(input_ids.shape[0])
+            .view(-1, 1)
+            .repeat(1, expand_size)
+            .view(-1)
+            .to(input_ids.device)
+        )
+        input_ids = input_ids.index_select(0, expanded_return_idx)
+
+        if "token_type_ids" in model_kwargs:
+            token_type_ids = model_kwargs["token_type_ids"]
+            model_kwargs["token_type_ids"] = token_type_ids.index_select(
+                0, expanded_return_idx
+            )
+
+        if attention_mask is not None:
+            model_kwargs["attention_mask"] = attention_mask.index_select(
+                0, expanded_return_idx
+            )
+
+        if is_encoder_decoder:
+            assert encoder_outputs is not None
+            encoder_outputs[
+                "last_hidden_state"
+            ] = encoder_outputs.last_hidden_state.index_select(
+                0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device)
+            )
+
+            # VAE specific code
+            encoder_outputs["vae_z"] = encoder_outputs.vae_z.index_select(
+                0, expanded_return_idx.to(encoder_outputs.vae_z.device)
+            )
+            loc = encoder_outputs.q_phi.loc.index_select(
+                0, expanded_return_idx.to(encoder_outputs.q_phi.loc.device)
+            )
+            scale = encoder_outputs.q_phi.scale.index_select(
+                0, expanded_return_idx.to(encoder_outputs.q_phi.scale.device)
+            )
+            encoder_outputs["q_phi"] = Normal(loc, scale)
+
+            model_kwargs["encoder_outputs"] = encoder_outputs
+
+        return input_ids, model_kwargs
+
+
 class GT8Base(T5PreTrainedModel, ABC):
     # Based on T5ForConditionalGeneration, from transformers 4.9.1
     # https://huggingface.co/transformers/_modules/transformers/models/t5/modeling_t5.html#T5ForConditionalGeneration
@@ -199,30 +383,12 @@ class GT8Base(T5PreTrainedModel, ABC):
         output_hidden_states=None,
         return_dict=None,
         target=None,
+        source=None,
     ):
-        r"""
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
-            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[-100, 0, ...,
-            config.vocab_size - 1]`. All labels set to ``-100`` are ignored (masked), the loss is only computed for
-            labels in ``[0, ..., config.vocab_size]``
-
-        Returns:
-
-        Examples::
-
-            >>> from transformers import T5Tokenizer, T5ForConditionalGeneration
-
-            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
-            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small')
-
-            >>> input_ids = tokenizer('The <extra_id_0> walks in <extra_id_1> park', return_tensors='pt').input_ids
-            >>> labels = tokenizer('<extra_id_0> cute dog <extra_id_1> the <extra_id_2> </s>', return_tensors='pt').input_ids
-            >>> outputs = model(input_ids=input_ids, labels=labels)
-            >>> loss = outputs.loss
-            >>> logits = outputs.logits
-
-            >>> input_ids = tokenizer("summarize: studies have shown that owning a dog is good for you ", return_tensors="pt").input_ids  # Batch size 1
-            >>> outputs = model.generate(input_ids)
+        """
+        target: Target format (can be "graph" or "text"). Only used when we don't specify it
+        already with an added prefix in the inputs, otherwise it can be None.
+        source: Source format ("graph" or "text"), passed to the encoder if it's not None.
         """
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
@@ -242,6 +408,9 @@ class GT8Base(T5PreTrainedModel, ABC):
         # Encode if needed (training). Note: even in training, in some cases we might
         # want to re-use the same encoder_outputs (CycleVAE dual loss)
         if encoder_outputs is None:
+            other_encoder_kwargs = {}
+            if source is not None:
+                other_encoder_kwargs["source"] = source
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -250,6 +419,7 @@ class GT8Base(T5PreTrainedModel, ABC):
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
+                **other_encoder_kwargs,
             )
 
         # to be fed to the decoder
@@ -415,26 +585,26 @@ class GT8Base(T5PreTrainedModel, ABC):
         max_seq_length: int,
         method: str,
         num_beams=-1,
-        vae_z: Optional[torch.Tensor] = None,
+        **other_kwargs,
     ):
         """
         Call `generate` on our model, specifying the target format (graph/text)
 
         Args:
-            vae_z:
             input_ids:
             target: 'text' or 'graph'
             tokenizer:
             max_seq_length:
             method: 'greedy', 'beam_search', 'sample' or 'top_k'
             num_beams: Used only when method='beam_search'
+            other_kwargs: 'vae_z' or 'source' format for instance. Will be passed to the model and the encoder
 
         Returns:
 
         """
         # specify the target format to the model
         if self.specify_target_with_prefix:
-            input_ids = add_prefix(
+            input_ids = add_target_prefix(
                 input_ids=input_ids,
                 target=target,
                 tokenizer=tokenizer,
@@ -455,8 +625,7 @@ class GT8Base(T5PreTrainedModel, ABC):
             "max_length": max_seq_length,
             "decoder_start_token_id": decoder_start_token_id,
         }
-        if vae_z is not None:
-            kwargs["vae_z"] = vae_z
+        kwargs.update(other_kwargs)
 
         # generate text according to the specified decoding method
         if method == "greedy":
@@ -533,9 +702,8 @@ class GT8NonVAE(GT8Base):
         return inputs
 
 
-class GT8FullVAE(GT8Base):
+class GT8FullVAE(GT8Base, VAEBase):
     encoder_cls = VariationalT5Encoder
-    beta: float  # to be specified by Trainer, before calling model forward
 
     def __init__(
         self,
@@ -545,7 +713,8 @@ class GT8FullVAE(GT8Base):
         generate_graph_token_id: int,
         reg_loss: Optional[str] = None,
     ):
-        super().__init__(
+        GT8Base.__init__(
+            self,
             config,
             specify_target_with_prefix=specify_target_with_prefix,
             generate_text_token_id=generate_text_token_id,
@@ -572,33 +741,18 @@ class GT8FullVAE(GT8Base):
             # with previously computed z~q(z|y_hat)), we remove the regularisation term
             return 0.0
 
-        # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
-        prior = Normal(
-            loc=torch.zeros_like(q_phi.loc),
-            scale=torch.ones_like(q_phi.scale),
-        )
+        # in all other cases, compute regularization loss as usual
+        super().compute_reg_loss(q_phi, z)
 
-        if self.reg_loss_type == "kl":
-            # (N, T, dim_z) as well, since kl_divergence on Normal distributions does not reduce result
-            kl_div = kl_divergence(q_phi, prior)
-            # reduce to a scalar by:
-            #   - summing over latent dim, to obtain the D_KL between multivariate Normal distributions
-            #   - taking the mean over batch and sequence dim, to match the
-            #       CrossEntropyLoss (which takes mean over N and T as well)
-            kl_div = kl_div.sum(dim=2).mean()
-            return kl_div
-        elif self.reg_loss_type == "mmd":
-            # https://github.com/amir-abdi/disentanglement-pytorch/blob/master/models/infovae.py
-            z_prior = prior.rsample()
-            mmd = self.compute_mmd(z, z_prior)
-            return mmd
-        else:
-            raise ValueError
-
-    # MMD-VAE specific methods
     @staticmethod
     def compute_kernel(x: torch.Tensor, y: torch.Tensor):
-        # original implementation: https://ermongroup.github.io/blog/a-tutorial-on-mmd-variational-autoencoders/
+        """
+        Compute the k(x,y) values with latent variable samples x,y. All combinations of x and y
+        across batch dim are considered, but not across sequence dim, for memory reasons.
+
+        Input: (N, T, dim)
+        Output: (N, N, T)
+        """
         N, T, dim = x.shape
         assert x.shape == y.shape
 
@@ -612,104 +766,72 @@ class GT8FullVAE(GT8Base):
         squared_dist_xy = torch.sum((tiled_x - tiled_y) ** 2, dim=-1)
         return torch.exp(-0.5 * squared_dist_xy / sigma_sqr)
 
-    def compute_mmd(self, x: torch.Tensor, y: torch.Tensor):
-        x_kernel = self.compute_kernel(x, x)
-        y_kernel = self.compute_kernel(y, y)
-        xy_kernel = self.compute_kernel(x, y)
-        # MMD = E[k(x,x)] + E[k(y,y)] - 2 * E[k(x,y)]
-        return torch.mean(x_kernel) + torch.mean(y_kernel) - 2 * torch.mean(xy_kernel)
 
-    # other methods
-    def prepare_inputs_for_generation(
+class GT8StyleVAE(VAEBase, GT8Base):
+    encoder_cls = StyleVAET5Encoder
+
+    def __init__(
         self,
-        input_ids,
-        past=None,
-        attention_mask=None,
-        head_mask=None,
-        decoder_head_mask=None,
-        cross_attn_head_mask=None,
-        use_cache=None,
-        encoder_outputs=None,
-        **kwargs,
+        config,
+        specify_target_with_prefix: bool,
+        generate_text_token_id: int,
+        generate_graph_token_id: int,
+        reg_loss: Optional[str] = None,
     ):
-        # cut decoder_input_ids if past is used
-        if past is not None:
-            input_ids = input_ids[:, -1:]
+        GT8Base.__init__(
+            self,
+            config,
+            specify_target_with_prefix=specify_target_with_prefix,
+            generate_text_token_id=generate_text_token_id,
+            generate_graph_token_id=generate_graph_token_id,
+        )
+        self.reg_loss_type = reg_loss
 
-        if "vae_z" in kwargs:
-            # use vae_z specified as a kwarg to the generate method
-            encoder_outputs.vae_z = kwargs["vae_z"]
-        else:
-            # take mu_z (but we could also sample)
-            encoder_outputs.vae_z = encoder_outputs.q_phi.loc
+    def get_hidden_states(self, encoder_outputs):
+        hidden_states = encoder_outputs.last_hidden_state  # (N, T, dim)
+        # replace the first token (initially the encoder representation of the
+        # [STYLE] token) with the latent style variable s_x or s_y
+        # Note: cloning is necessary to avoid inplace operations
+        hidden_states[:, 0] = encoder_outputs.vae_z.clone()
+        return hidden_states
 
-        inputs = {
-            "decoder_input_ids": input_ids,
-            "past_key_values": past,
-            "encoder_outputs": encoder_outputs,
-            "attention_mask": attention_mask,
-            "head_mask": head_mask,
-            "decoder_head_mask": decoder_head_mask,
-            "cross_attn_head_mask": cross_attn_head_mask,
-            "use_cache": use_cache,
-        }
-        return inputs
+    def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
+        reg_loss = self.compute_reg_loss(
+            q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_z
+        )
+        return recon_loss + self.beta * reg_loss, reg_loss
 
     @staticmethod
-    def _expand_inputs_for_generation(
-        input_ids: torch.LongTensor,
-        expand_size: int = 1,
-        is_encoder_decoder: bool = False,
-        attention_mask: torch.LongTensor = None,
-        encoder_outputs: VariationalT5EncoderOutput = None,
-        **model_kwargs,
-    ) -> Tuple[torch.LongTensor, Dict[str, Any]]:
+    def compute_kernel(x: torch.Tensor, y: torch.Tensor):
         """
-        Expand tensors across the batch dimension, e.g. to have num_beams*batch_size
-        instead of batch_size. Called during beam search generation for instance.
+        Compute the k(x,y) values with latent variable samples x,y. All combinations of x and y
+        are considered here (since there is a single latent variable per sequence -> no sequence dimension).
 
-        We redefine this function to also expand vae_mu_z/vae_sigma_z (in encoder_outputs).
+        Input: (N, dim)
+        Output: (N, N)
         """
-        expanded_return_idx = (
-            torch.arange(input_ids.shape[0])
-            .view(-1, 1)
-            .repeat(1, expand_size)
-            .view(-1)
-            .to(input_ids.device)
-        )
-        input_ids = input_ids.index_select(0, expanded_return_idx)
+        N, dim = x.shape
+        assert x.shape == y.shape
 
-        if "token_type_ids" in model_kwargs:
-            token_type_ids = model_kwargs["token_type_ids"]
-            model_kwargs["token_type_ids"] = token_type_ids.index_select(
-                0, expanded_return_idx
-            )
+        tiled_x = x.view(N, 1, dim).repeat(1, N, 1)
+        tiled_y = y.view(1, N, dim).repeat(N, 1, 1)
 
-        if attention_mask is not None:
-            model_kwargs["attention_mask"] = attention_mask.index_select(
-                0, expanded_return_idx
-            )
+        # compute RBF kernel k(x,y), shape: (N, N)
+        sigma_sqr = dim ** 2 / 2
+        squared_dist_xy = torch.sum((tiled_x - tiled_y) ** 2, dim=-1)
+        return torch.exp(-0.5 * squared_dist_xy / sigma_sqr)
 
-        if is_encoder_decoder:
-            assert encoder_outputs is not None
-            encoder_outputs[
-                "last_hidden_state"
-            ] = encoder_outputs.last_hidden_state.index_select(
-                0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device)
-            )
+    def generate_with_target(
+        self,
+        *args,
+        **kwargs,
+    ):
+        # add the 'source' kwarg to the generation (will be passed to encoder)
+        if kwargs["target"] == "text":
+            kwargs["source"] = "graph"
+        elif kwargs["target"] == "graph":
+            kwargs["source"] = "text"
+        else:
+            raise ValueError
 
-            # VAE specific code
-            encoder_outputs["vae_z"] = encoder_outputs.vae_z.index_select(
-                0, expanded_return_idx.to(encoder_outputs.vae_z.device)
-            )
-            loc = encoder_outputs.q_phi.loc.index_select(
-                0, expanded_return_idx.to(encoder_outputs.q_phi.loc.device)
-            )
-            scale = encoder_outputs.q_phi.scale.index_select(
-                0, expanded_return_idx.to(encoder_outputs.q_phi.scale.device)
-            )
-            encoder_outputs["q_phi"] = Normal(loc, scale)
-
-            model_kwargs["encoder_outputs"] = encoder_outputs
-
-        return input_ids, model_kwargs
+        return super().generate_with_target(*args, **kwargs)
