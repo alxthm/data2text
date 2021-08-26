@@ -223,7 +223,7 @@ class Seq2seqTrainer:
     ):
         # -- auto loss (denoising auto-encoding)
         noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
-        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=False)
+        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=True)
         text_outputs = self.teach_model_one_step(
             noisy_text_ids, text_ids, target="text"
         )
@@ -319,11 +319,13 @@ class Seq2seqTrainer:
         self, text_ids: torch.Tensor, graph_ids: torch.Tensor
     ):
         # -- auto loss (style VAE)
+        noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
+        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=True)
         text_outputs = self.teach_model_one_step(
-            text_ids, text_ids, source="text", target="text"
+            noisy_text_ids, text_ids, source="text", target="text"
         )
         graph_outputs = self.teach_model_one_step(
-            graph_ids, graph_ids, source="graph", target="graph"
+            noisy_graph_ids, graph_ids, source="graph", target="graph"
         )
 
         # -- cycle loss (style VAE)
