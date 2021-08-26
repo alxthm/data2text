@@ -132,7 +132,9 @@ class Seq2seqTrainer:
         target: str,
         vae_z: Optional[torch.FloatTensor] = None,
         retain_graph: bool = False,
+        source: str = None,
     ) -> GT8ModelOutput:
+
         """
         Run a forward pass in the model using input_ids, and backward the loss wrt label_ids.
         If necessary, append prefix to input_ids (to specify text/graph target).
@@ -150,6 +152,7 @@ class Seq2seqTrainer:
             model_outputs
 
         """
+
         if vae_z is None:
             # usual case
             model = self.accelerator.unwrap_model(self.ddp_model)
@@ -168,7 +171,7 @@ class Seq2seqTrainer:
         else:
             # instead of using input ids, we use vae_z already computed from some input_ids
             att_mask_input = None
-            encoder_outputs = VariationalT5EncoderOutput(vae_z=vae_z)
+            encoder_outputs = VariationalT5EncoderOutput(vae_latent=vae_z)
 
         # todo: check if we need to set pad token ids to -100 in the labels,
         #  to ignore them when computing the loss
@@ -179,6 +182,7 @@ class Seq2seqTrainer:
             labels=label_ids,
             target=target,
             encoder_outputs=encoder_outputs,
+            **kwargs,
         )
         # we call loss.backward() here to free GPU memory for the next steps
         # -> computed gradients are kept in the leaf variables (the parameters)
@@ -221,14 +225,22 @@ class Seq2seqTrainer:
         self, text_ids: torch.Tensor, graph_ids: torch.Tensor
     ):
         # -- auto loss (regular VAE)
-        text_outputs = self.teach_model_one_step(text_ids, text_ids, target="text")
-        graph_outputs = self.teach_model_one_step(graph_ids, graph_ids, target="graph")
+        text_outputs = self.teach_model_one_step(
+            text_ids, text_ids, target="text", source="text"
+        )
+        graph_outputs = self.teach_model_one_step(
+            graph_ids, graph_ids, target="graph", source="graph"
+        )
 
         # -- cycle loss (single)
-        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
-        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
-        g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
-        t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
+        syn_graph_ids = self.predict(input_ids=text_ids, target="graph", source="text")
+        syn_text_ids = self.predict(input_ids=graph_ids, target="text", source="graph")
+        g2t_outputs = self.teach_model_one_step(
+            syn_graph_ids, text_ids, target="text", source="graph"
+        )
+        t2g_outputs = self.teach_model_one_step(
+            syn_text_ids, graph_ids, target="graph", source="text"
+        )
 
         # total loss
         # loss = (
@@ -256,13 +268,13 @@ class Seq2seqTrainer:
             syn_graph_ids, text_ids, target="text", retain_graph=True
         )
         g2t_outputs_bis = self.teach_model_one_step(
-            None, syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_z
+            None, syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_latent
         )
         t2g_outputs = self.teach_model_one_step(
             syn_text_ids, graph_ids, target="graph", retain_graph=True
         )
         t2g_outputs_bis = self.teach_model_one_step(
-            None, syn_text_ids, target="text", vae_z=t2g_outputs.vae_z
+            None, syn_text_ids, target="text", vae_z=t2g_outputs.vae_latent
         )
 
         # total loss

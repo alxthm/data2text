@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from src.data.datasets import WebNLG2020
 from src.data.formatting import GraphFormat, GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN
 from src.eval.evaluator import EvaluatorWebNLG
-from src.model import GT8FullVAE, GT8NonVAE
+from src.model import GT8FullVAE, GT8NonVAE, GT8StyleVAE
 from src.trainer import Seq2seqTrainer
 from src.utils import (
     WarningsFilter,
@@ -21,6 +21,7 @@ from src.utils import (
     ModelSummary,
     Mode,
     CycleVAELoss,
+    VAEModel,
 )
 
 
@@ -40,13 +41,10 @@ def main(timestamp: str):
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
     logging.info(OmegaConf.to_yaml(conf))
-    run_name = (
-        f"{timestamp}-{conf.mode}-{conf.model}"
-    )
-    if conf.use_vae:
-        run_name += f"-vae-{conf.vae.cycle_loss}"
-    else:
-        run_name += "regular"
+    run_name = f"{timestamp}-{conf.mode}-{conf.model}-{conf.vae.model}"
+    vae_model = VAEModel(conf.vae.model)
+    if vae_model == VAEModel.full_vae:
+        run_name += f"-{conf.vae.cycle_loss}"
 
     # seed everything
     seed_everything(conf.seed)
@@ -88,21 +86,38 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model (todo: put parameters in model config and load from_config?)
-    if conf.use_vae:
+    if vae_model == VAEModel.full_vae:
         model = GT8FullVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
             generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+            generate_graph_token_id=tokenizer.convert_tokens_to_ids(
+                GENERATE_GRAPH_TOKEN
+            ),
             reg_loss=conf.vae.reg,
         )
-    else:
+    elif vae_model == VAEModel.style_vae:
+        model = GT8StyleVAE.from_pretrained(
+            conf.model,
+            specify_target_with_prefix=conf.specify_target_with_prefix,
+            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
+            generate_graph_token_id=tokenizer.convert_tokens_to_ids(
+                GENERATE_GRAPH_TOKEN
+            ),
+            reg_loss=conf.vae.reg,
+        )
+    elif vae_model == VAEModel.non_vae:
         model = GT8NonVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
             generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+            generate_graph_token_id=tokenizer.convert_tokens_to_ids(
+                GENERATE_GRAPH_TOKEN
+            ),
         )
+    else:
+        raise ValueError
+
     # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")

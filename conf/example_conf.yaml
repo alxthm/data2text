@@ -21,6 +21,7 @@ vae:
   reg: "mmd"  # 'kl' for a regular VAE, 'mmd' for a MMD-VAE, the regularisation loss
   beta: 10.  # coefficient in front of the VAE regularisation loss (KL or MMD)
   beta_n_cycle: -1  # number of cycles for the beta-VAE schedule (-1 for regular VAE: constant beta=1)
+  model: "style_vae" 
 # -- specific to unsupervised
 generate_method: "greedy"  # 'greedy', 'sample', 'top_k'
 sample_noise_fun:  # which noise functions to sample from?
