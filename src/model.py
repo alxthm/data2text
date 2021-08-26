@@ -124,9 +124,9 @@ class StyleVAET5Encoder(T5Stack):
     def forward(self, *args, **kwargs):
         # get input format (and raise an error if we are missing this argument)
         source_format = kwargs.pop("source")
-
         # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
         assert kwargs["return_dict"]
+
         encoder_outputs = super().forward(*args, **kwargs)  # (N, T, dim)
 
         # representation of our special [STYLE] token, after encoding
@@ -702,7 +702,7 @@ class GT8NonVAE(GT8Base):
         return inputs
 
 
-class GT8FullVAE(GT8Base, VAEBase):
+class GT8FullVAE(VAEBase, GT8Base):
     encoder_cls = VariationalT5Encoder
 
     def __init__(
@@ -742,7 +742,7 @@ class GT8FullVAE(GT8Base, VAEBase):
             return 0.0
 
         # in all other cases, compute regularization loss as usual
-        super().compute_reg_loss(q_phi, z)
+        return super().compute_reg_loss(q_phi, z)
 
     @staticmethod
     def compute_kernel(x: torch.Tensor, y: torch.Tensor):
