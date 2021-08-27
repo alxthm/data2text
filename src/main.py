@@ -10,7 +10,12 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
 from src.data.datasets import WebNLG2020
-from src.data.formatting import GraphFormat, GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN
+from src.data.formatting import (
+    GraphFormat,
+    GENERATE_TEXT_TOKEN,
+    GENERATE_GRAPH_TOKEN,
+    STYLE_TOKEN,
+)
 from src.eval.evaluator import EvaluatorWebNLG
 from src.model import GT8FullVAE, GT8NonVAE, GT8StyleVAE
 from src.trainer import Seq2seqTrainer
@@ -36,7 +41,9 @@ def main(timestamp: str):
     if vae_model == VAEModel.style_vae:
         # for the StyleVAE, we don't use all parameters before each backward call (since we compute
         # either vae_s_x or vae_s_y), so this is necessary (https://pytorch.org/docs/stable/notes/ddp.html)
-        accelerator_kwargs = [DistributedDataParallelKwargs(find_unused_parameters=True)]
+        accelerator_kwargs = [
+            DistributedDataParallelKwargs(find_unused_parameters=True)
+        ]
     accelerator = Accelerator(kwargs_handlers=accelerator_kwargs)
 
     # format logging
@@ -75,6 +82,8 @@ def main(timestamp: str):
         GraphFormat.BLANK_TOKEN,
     ]
     tokenizer.add_tokens(new_tokens)
+    if vae_model == VAEModel.style_vae:
+        tokenizer.add_tokens(STYLE_TOKEN)
     if not conf.specify_target_with_prefix:
         # to be used as a start_token in decoder inputs
         # these ones are special tokens, since we do not want them
@@ -83,6 +92,18 @@ def main(timestamp: str):
         tokenizer.add_tokens(
             [GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN], special_tokens=True
         )
+        generate_text_tok_id = tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN)
+        generate_graph_tok_id = tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN)
+        assert (
+            tokenizer.convert_ids_to_tokens(generate_text_tok_id) == GENERATE_TEXT_TOKEN
+        )
+        assert (
+            tokenizer.convert_ids_to_tokens(generate_graph_tok_id)
+            == GENERATE_GRAPH_TOKEN
+        )
+    else:
+        generate_text_tok_id = None
+        generate_graph_tok_id = None
 
     # load data
     data_dir = project_dir / "data"
@@ -99,30 +120,24 @@ def main(timestamp: str):
         model = GT8FullVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
-            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(
-                GENERATE_GRAPH_TOKEN
-            ),
+            generate_text_token_id=generate_text_tok_id,
+            generate_graph_token_id=generate_graph_tok_id,
             reg_loss=conf.vae.reg,
         )
     elif vae_model == VAEModel.style_vae:
         model = GT8StyleVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
-            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(
-                GENERATE_GRAPH_TOKEN
-            ),
+            generate_text_token_id=generate_text_tok_id,
+            generate_graph_token_id=generate_graph_tok_id,
             reg_loss=conf.vae.reg,
         )
     elif vae_model == VAEModel.non_vae:
         model = GT8NonVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
-            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(
-                GENERATE_GRAPH_TOKEN
-            ),
+            generate_text_token_id=generate_text_tok_id,
+            generate_graph_token_id=generate_graph_tok_id,
         )
     else:
         raise ValueError

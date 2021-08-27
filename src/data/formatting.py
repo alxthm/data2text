@@ -191,6 +191,8 @@ def add_style_prefix(input_ids: torch.Tensor, tokenizer: PreTrainedTokenizer):
     Inspired from T5 `_shift_right` method
     """
     style_token_id = tokenizer.convert_tokens_to_ids(STYLE_TOKEN)
+    # make sure STYLE_TOKEN was correctly converted to id (e.g. verify it's known '<unk>')
+    assert tokenizer.convert_ids_to_tokens(style_token_id) == STYLE_TOKEN
 
     # shift inputs to the right
     shifted_input_ids = input_ids.new_zeros(input_ids.shape)
