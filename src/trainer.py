@@ -16,11 +16,16 @@ from transformers import (
 from accelerate import Accelerator
 
 from src.data.datasets import Seq2seqDataset
-from src.data.formatting import add_prefix
+from src.data.formatting import add_target_prefix, add_style_prefix
 from src.data.noise import existing_noise_functions
 from src.eval.evaluator import EvaluatorWebNLG
-from src.model import GT8ModelOutput, GT8FullVAE, VariationalT5EncoderOutput
-from src.utils import MyLogger, Mode, frange_cycle_zero_linear, CycleVAELoss
+from src.model import (
+    GT8ModelOutput,
+    GT8FullVAE,
+    VariationalT5EncoderOutput,
+    GT8StyleVAE,
+)
+from src.utils import MyLogger, Mode, frange_cycle_zero_linear, CycleVAELoss, VAEModel
 
 
 class Seq2seqTrainer:
@@ -32,6 +37,7 @@ class Seq2seqTrainer:
         model,
         mode: Mode,
         vae_cycle_loss: CycleVAELoss,
+        vae_model: VAEModel,
         vae_beta: float,
         beta_n_cycle: int,
         tokenizer: PreTrainedTokenizer,
@@ -89,7 +95,12 @@ class Seq2seqTrainer:
         self.noise_functions = noise_fn
         self.generate_method = generate_method
         # VAE specific code
-        self.use_vae = isinstance(model, GT8FullVAE)
+        self.vae_model = vae_model
+        self.use_vae = (
+            vae_model == VAEModel.full_vae
+            or vae_model == VAEModel.style_vae
+            or vae_model == VAEModel.added_style_vae
+        )
         if self.use_vae:
             self.vae_cycle_loss = vae_cycle_loss
             self.use_cyclical_beta_schedule = beta_n_cycle > -1
@@ -130,7 +141,6 @@ class Seq2seqTrainer:
         input_ids: Optional[torch.Tensor],
         label_ids: torch.Tensor,
         target: str,
-        vae_z: Optional[torch.FloatTensor] = None,
         retain_graph: bool = False,
         source: str = None,
     ) -> GT8ModelOutput:
@@ -145,36 +155,39 @@ class Seq2seqTrainer:
             label_ids: label (ground truth graph/text as a tokenized sequence)
             target: 'text' or 'graph', depending on the format of label sequences. Will
                 determine the prefix to add to input_ids, or the token to specify to the decoder
-            vae_z: (optional) from a previous training step
-            retain_graph: passed to the backward
+            retain_graph: passed to the backward (default: False)
+            source: None by default, otherwise 'text' or 'graph' and passed to model forward
 
         Returns:
             model_outputs
 
         """
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        if model.specify_target_with_prefix:
+            # add the prefix "generate graph/text" to the input
+            # (if model.specify_target_with_prefix=False, the model handles this itself
+            # and uses the right decoder_start_token_id in the forward)
+            input_ids = add_target_prefix(
+                input_ids=input_ids,
+                target=target,
+                tokenizer=self.tokenizer,
+                max_seq_len=self.max_seq_length,
+            )
 
-        if vae_z is None:
-            # usual case
-            model = self.accelerator.unwrap_model(self.ddp_model)
-            if model.specify_target_with_prefix:
-                # add the prefix "generate graph/text" to the input
-                # (if model.specify_target_with_prefix=False, the model handles this itself
-                # and uses the right decoder_start_token_id in the forward)
-                input_ids = add_prefix(
-                    input_ids=input_ids,
-                    target=target,
-                    tokenizer=self.tokenizer,
-                    max_seq_len=self.max_seq_length,
-                )
-            att_mask_input = self.get_att_mask(input_ids)
-            encoder_outputs = None
-        else:
-            # instead of using input ids, we use vae_z already computed from some input_ids
-            att_mask_input = None
-            encoder_outputs = VariationalT5EncoderOutput(vae_latent=vae_z)
+        # if necessary (for the style_vae), add a special [STYLE] token and specify the source format
+        kwargs = {}
+        if (
+            self.vae_model == VAEModel.style_vae
+            or self.vae_model == VAEModel.added_style_vae
+        ):
+            kwargs["source"] = source
+        if self.vae_model == VAEModel.style_vae:
+            # todo: careful when merging to check that it's the styleVAE with prefix
+            input_ids = add_style_prefix(input_ids=input_ids, tokenizer=self.tokenizer)
 
-        # todo: check if we need to set pad token ids to -100 in the labels,
-        #  to ignore them when computing the loss
+        att_mask_input = self.get_att_mask(input_ids)
+        encoder_outputs = None
+
         self.ddp_model.train()
         outputs = self.ddp_model(
             input_ids=input_ids,
@@ -192,12 +205,34 @@ class Seq2seqTrainer:
         self.accelerator.backward(outputs.loss, retain_graph=retain_graph)
         return outputs
 
+    def teach_model_one_step_with_vae_z(
+        self,
+        label_ids: torch.Tensor,
+        target: str,
+        vae_z: Optional[torch.FloatTensor] = None,
+    ):
+        """
+        (Only used by the GT8FullVAE model, with dual cycle loss)
+        Run a forward pass re-using some vae_z already computed from some input_ids,
+        instead of input_ids
+        """
+        # instead of using input ids, we use
+        encoder_outputs = VariationalT5EncoderOutput(vae_z=vae_z)
+        self.ddp_model.train()
+        outputs = self.ddp_model(
+            labels=label_ids,
+            target=target,
+            encoder_outputs=encoder_outputs,
+        )
+        self.accelerator.backward(outputs.loss)
+        return outputs
+
     def compute_loss_unsup_non_vae(
         self, text_ids: torch.Tensor, graph_ids: torch.Tensor
     ):
         # -- auto loss (denoising auto-encoding)
         noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
-        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=False)
+        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=True)
         text_outputs = self.teach_model_one_step(
             noisy_text_ids, text_ids, target="text"
         )
@@ -267,14 +302,14 @@ class Seq2seqTrainer:
         g2t_outputs = self.teach_model_one_step(
             syn_graph_ids, text_ids, target="text", retain_graph=True
         )
-        g2t_outputs_bis = self.teach_model_one_step(
-            None, syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_latent
+        g2t_outputs_bis = self.teach_model_one_step_with_vae_z(
+            syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_latent
         )
         t2g_outputs = self.teach_model_one_step(
             syn_text_ids, graph_ids, target="graph", retain_graph=True
         )
-        t2g_outputs_bis = self.teach_model_one_step(
-            None, syn_text_ids, target="text", vae_z=t2g_outputs.vae_latent
+        t2g_outputs_bis = self.teach_model_one_step_with_vae_z(
+            syn_text_ids, target="text", vae_z=t2g_outputs.vae_latent
         )
 
         # total loss
@@ -295,6 +330,36 @@ class Seq2seqTrainer:
             "t2g_bis": t2g_outputs_bis,
             "g2t": g2t_outputs,
             "g2t_bis": g2t_outputs_bis,
+        }
+
+    def compute_loss_unsup_style_vae(
+        self, text_ids: torch.Tensor, graph_ids: torch.Tensor
+    ):
+        # -- auto loss (style VAE)
+        noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
+        noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=True)
+        text_outputs = self.teach_model_one_step(
+            noisy_text_ids, text_ids, source="text", target="text"
+        )
+        graph_outputs = self.teach_model_one_step(
+            noisy_graph_ids, graph_ids, source="graph", target="graph"
+        )
+
+        # -- cycle loss (style VAE)
+        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
+        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+        g2t_outputs = self.teach_model_one_step(
+            syn_graph_ids, text_ids, source="graph", target="text"
+        )
+        t2g_outputs = self.teach_model_one_step(
+            syn_text_ids, graph_ids, source="text", target="graph"
+        )
+
+        return {
+            "text": text_outputs,
+            "graph": graph_outputs,
+            "t2g": t2g_outputs,
+            "g2t": g2t_outputs,
         }
 
     def train(self):
@@ -359,7 +424,11 @@ class Seq2seqTrainer:
                 elif self.mode == Mode.both_unsup:
                     # todo: make sure the predictions are correctly formatted, especially the attention mask
                     #   -> does it start with an unnecessary padding token?
-                    if self.use_vae:
+                    if self.vae_model == VAEModel.non_vae:
+                        outputs = self.compute_loss_unsup_non_vae(
+                            text_ids=text_ids, graph_ids=graph_ids
+                        )
+                    elif self.vae_model == VAEModel.full_vae:
                         if self.vae_cycle_loss == CycleVAELoss.single:
                             outputs = self.compute_loss_unsup_vae_single(
                                 text_ids=text_ids, graph_ids=graph_ids
@@ -368,10 +437,15 @@ class Seq2seqTrainer:
                             outputs = self.compute_loss_unsup_vae_dual(
                                 text_ids=text_ids, graph_ids=graph_ids
                             )
-                    else:
-                        outputs = self.compute_loss_unsup_non_vae(
+                    elif (
+                        self.vae_model == VAEModel.style_vae
+                        or self.vae_model == VAEModel.added_style_vae
+                    ):
+                        outputs = self.compute_loss_unsup_style_vae(
                             text_ids=text_ids, graph_ids=graph_ids
                         )
+                    else:
+                        raise ValueError
 
                 # loss.backward has already been called (in teach_model_one_step)
                 self.accelerator.clip_grad_norm_(
@@ -452,7 +526,7 @@ class Seq2seqTrainer:
             metrics[f"train/loss_{mode}"] = outputs.loss.item()
             if "recon_loss" in outputs:
                 metrics[f"train/recon_loss_{mode}"] = outputs.recon_loss.item()
-            if "reg_loss" in outputs:
+            if "reg_loss" in outputs and isinstance(outputs.reg_loss, torch.Tensor):
                 metrics[f"train/reg_loss_{mode}"] = outputs.reg_loss.item()
 
         # log vae_beta coeff if we have a VAE model

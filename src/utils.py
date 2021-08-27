@@ -23,6 +23,28 @@ class Mode(Enum):
     both_unsup = "both_unsup"
 
 
+class VAEModel(Enum):
+    non_vae = "non_vae"
+    full_vae = "full_vae"
+    style_vae = "style_vae"
+    added_style_vae = "added_style_vae"
+
+
+class CycleVAELoss(Enum):
+    """
+    Which Cycle loss to use with a FullVAE model (many-to-many with a single latent variable z for
+    content and style, between encoder and decoder).
+    This is in addition (or after a couple epochs) the vanilla VAE loss.
+    """
+
+    # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z)]
+    #                   - KL(q(z|y_noisy) || p(z))
+    single = "single"
+    # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z) + log p(y_noisy|z)]
+    #                   - KL(q(z|y_noisy) || p(z))
+    dual = "dual"
+
+
 class WarningsFilter:
     def __init__(self, stream):
         """
@@ -453,24 +475,3 @@ def _format_summary_table(
     summary += "Total params"
 
     return summary
-
-
-class VAEModel(Enum):
-    non_vae = "non_vae"
-    full_vae = "full_vae"
-    style_vae = "style_vae"
-
-
-class CycleVAELoss(Enum):
-    """
-    Which Cycle loss to use with a FullVAE model (many-to-many with a single latent variable z for
-    content and style, between encoder and decoder).
-    This is in addition (or after a couple epochs) the vanilla VAE loss.
-    """
-
-    # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z)]
-    #                   - KL(q(z|y_noisy) || p(z))
-    single = "single"
-    # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z) + log p(y_noisy|z)]
-    #                   - KL(q(z|y_noisy) || p(z))
-    dual = "dual"
