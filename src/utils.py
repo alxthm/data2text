@@ -23,9 +23,17 @@ class Mode(Enum):
     both_unsup = "both_unsup"
 
 
+class VAEModel(Enum):
+    non_vae = "non_vae"
+    full_vae = "full_vae"
+    style_vae = "style_vae"
+
+
 class CycleVAELoss(Enum):
     """
-    Which Cycle loss to use with a VAE model, in addition (or after) the vanilla VAE loss
+    Which Cycle loss to use with a FullVAE model (many-to-many with a single latent variable z for
+    content and style, between encoder and decoder).
+    This is in addition (or after a couple epochs) the vanilla VAE loss.
     """
 
     # cycle_elbo(x) = E_{z~(z|y_noisy}[log p(x|z)]

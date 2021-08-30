@@ -4,15 +4,20 @@ import sys
 from pathlib import Path
 
 import mlflow
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 
 from src.data.datasets import WebNLG2020
-from src.data.formatting import GraphFormat, GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN
+from src.data.formatting import (
+    GraphFormat,
+    GENERATE_TEXT_TOKEN,
+    GENERATE_GRAPH_TOKEN,
+    STYLE_TOKEN,
+)
 from src.eval.evaluator import EvaluatorWebNLG
-from src.model import GT8FullVAE, GT8NonVAE
+from src.model import GT8FullVAE, GT8NonVAE, GT8StyleVAE
 from src.trainer import Seq2seqTrainer
 from src.utils import (
     WarningsFilter,
@@ -21,32 +26,41 @@ from src.utils import (
     ModelSummary,
     Mode,
     CycleVAELoss,
+    VAEModel,
 )
 
 
 def main(timestamp: str):
+    # Load config
+    project_dir = Path(__file__).resolve().parents[1]
+    conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+
     # multi-GPU handler
-    accelerator = Accelerator()
+    vae_model = VAEModel(conf.vae.model)
+    accelerator_kwargs = []
+    if vae_model == VAEModel.style_vae:
+        # for the StyleVAE, we don't use all parameters before each backward call (since we compute
+        # either vae_s_x or vae_s_y), so this is necessary (https://pytorch.org/docs/stable/notes/ddp.html)
+        accelerator_kwargs = [
+            DistributedDataParallelKwargs(find_unused_parameters=True)
+        ]
+    accelerator = Accelerator(kwargs_handlers=accelerator_kwargs)
+
+    # format logging
     logging.basicConfig(
         format="%(process)d %(asctime)s %(message)s",
         datefmt="[%H:%M:%S]",
         level=logging.INFO if accelerator.is_local_main_process else logging.ERROR,
     )
 
-    # Load config
-    project_dir = Path(__file__).resolve().parents[1]
-    conf = OmegaConf.load(project_dir / "conf/conf_seq_to_seq.yaml")
+    # complete and print conf, with a specific run name
     use_loggers = accelerator.is_local_main_process and not conf.fast_dev_run
     conf.use_fp16 = accelerator.use_fp16
     conf.num_processes = accelerator.num_processes
     logging.info(OmegaConf.to_yaml(conf))
-    run_name = (
-        f"{timestamp}-{conf.mode}-{conf.model}"
-    )
-    if conf.use_vae:
-        run_name += f"-vae-{conf.vae.cycle_loss}"
-    else:
-        run_name += "regular"
+    run_name = f"{timestamp}-{conf.mode}-{conf.model}-{conf.vae.model}"
+    if vae_model == VAEModel.full_vae:
+        run_name += f"-{conf.vae.cycle_loss}"
 
     # seed everything
     seed_everything(conf.seed)
@@ -68,6 +82,8 @@ def main(timestamp: str):
         GraphFormat.BLANK_TOKEN,
     ]
     tokenizer.add_tokens(new_tokens)
+    if vae_model == VAEModel.style_vae:
+        tokenizer.add_tokens(STYLE_TOKEN)
     if not conf.specify_target_with_prefix:
         # to be used as a start_token in decoder inputs
         # these ones are special tokens, since we do not want them
@@ -76,6 +92,18 @@ def main(timestamp: str):
         tokenizer.add_tokens(
             [GENERATE_TEXT_TOKEN, GENERATE_GRAPH_TOKEN], special_tokens=True
         )
+        generate_text_tok_id = tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN)
+        generate_graph_tok_id = tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN)
+        assert (
+            tokenizer.convert_ids_to_tokens(generate_text_tok_id) == GENERATE_TEXT_TOKEN
+        )
+        assert (
+            tokenizer.convert_ids_to_tokens(generate_graph_tok_id)
+            == GENERATE_GRAPH_TOKEN
+        )
+    else:
+        generate_text_tok_id = None
+        generate_graph_tok_id = None
 
     # load data
     data_dir = project_dir / "data"
@@ -88,21 +116,33 @@ def main(timestamp: str):
     train_dataset = datasets["train"]
 
     # prepare model (todo: put parameters in model config and load from_config?)
-    if conf.use_vae:
+    if vae_model == VAEModel.full_vae:
         model = GT8FullVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
-            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+            generate_text_token_id=generate_text_tok_id,
+            generate_graph_token_id=generate_graph_tok_id,
             reg_loss=conf.vae.reg,
         )
-    else:
+    elif vae_model == VAEModel.style_vae:
+        model = GT8StyleVAE.from_pretrained(
+            conf.model,
+            specify_target_with_prefix=conf.specify_target_with_prefix,
+            generate_text_token_id=generate_text_tok_id,
+            generate_graph_token_id=generate_graph_tok_id,
+            reg_loss=conf.vae.reg,
+            use_style_token=conf.vae.use_style_token,
+        )
+    elif vae_model == VAEModel.non_vae:
         model = GT8NonVAE.from_pretrained(
             conf.model,
             specify_target_with_prefix=conf.specify_target_with_prefix,
-            generate_text_token_id=tokenizer.convert_tokens_to_ids(GENERATE_TEXT_TOKEN),
-            generate_graph_token_id=tokenizer.convert_tokens_to_ids(GENERATE_GRAPH_TOKEN),
+            generate_text_token_id=generate_text_tok_id,
+            generate_graph_token_id=generate_graph_tok_id,
         )
+    else:
+        raise ValueError
+
     # extend embedding matrices to include new tokens
     model.resize_token_embeddings(len(tokenizer))
     summary = ModelSummary(model, mode="top")
@@ -111,6 +151,7 @@ def main(timestamp: str):
     trainer = Seq2seqTrainer(
         model=model,
         mode=Mode(conf.mode),
+        vae_model=vae_model,
         vae_cycle_loss=CycleVAELoss(conf.vae.cycle_loss),
         vae_beta=conf.vae.beta,
         beta_n_cycle=conf.vae.beta_n_cycle,

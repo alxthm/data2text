@@ -6,6 +6,7 @@ from transformers import PreTrainedTokenizer
 
 GENERATE_TEXT_TOKEN = "[GENERATE_TEXT]"
 GENERATE_GRAPH_TOKEN = "[GENERATE_GRAPH]"
+STYLE_TOKEN = "[STYLE]"
 
 
 @dataclass
@@ -154,7 +155,7 @@ class GraphFormat:
         return triples
 
 
-def add_prefix(
+def add_target_prefix(
     input_ids: torch.Tensor,
     target: str,
     tokenizer: PreTrainedTokenizer,
@@ -182,3 +183,19 @@ def add_prefix(
     )
     batch_encoding = batch_encoding.to(input_ids.device)
     return batch_encoding.input_ids
+
+
+def add_style_prefix(input_ids: torch.Tensor, tokenizer: PreTrainedTokenizer):
+    """
+    Take input_ids, shift it to the right and add the [STYLE] special token at the beginning.
+    Inspired from T5 `_shift_right` method
+    """
+    style_token_id = tokenizer.convert_tokens_to_ids(STYLE_TOKEN)
+    # make sure STYLE_TOKEN was correctly converted to id (e.g. verify it's known '<unk>')
+    assert tokenizer.convert_ids_to_tokens(style_token_id) == STYLE_TOKEN
+
+    # shift inputs to the right
+    shifted_input_ids = input_ids.new_zeros(input_ids.shape)
+    shifted_input_ids[..., 1:] = input_ids[..., :-1].clone()
+    shifted_input_ids[..., 0] = style_token_id
+    return shifted_input_ids
