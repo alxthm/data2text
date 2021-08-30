@@ -17,7 +17,7 @@ from src.data.formatting import (
     STYLE_TOKEN,
 )
 from src.eval.evaluator import EvaluatorWebNLG
-from src.model import GT8FullVAE, GT8NonVAE, GT8StyleVAE, GT8AddStyleVAE
+from src.model import GT8FullVAE, GT8NonVAE, GT8StyleVAE
 from src.trainer import Seq2seqTrainer
 from src.utils import (
     WarningsFilter,
@@ -131,14 +131,7 @@ def main(timestamp: str):
             generate_text_token_id=generate_text_tok_id,
             generate_graph_token_id=generate_graph_tok_id,
             reg_loss=conf.vae.reg,
-        )
-    elif vae_model == VAEModel.added_style_vae:
-        model = GT8AddStyleVAE.from_pretrained(
-            conf.model,
-            specify_target_with_prefix=conf.specify_target_with_prefix,
-            generate_text_token_id=generate_text_tok_id,
-            generate_graph_token_id=generate_graph_tok_id,
-            reg_loss=conf.vae.reg,
+            use_style_token=conf.vae.use_style_token,
         )
     elif vae_model == VAEModel.non_vae:
         model = GT8NonVAE.from_pretrained(

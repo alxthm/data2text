@@ -109,7 +109,9 @@ class VariationalT5Encoder(T5Stack):
         )
 
 
-class AddedStyleVAET5Encoder(T5Stack):
+class StyleVAET5Encoder(T5Stack):
+    use_style_token: bool  # set in the full model init
+
     def __init__(self, config: T5Config, embed_tokens: nn.Embedding = None):
         super().__init__(config, embed_tokens)
 
@@ -124,57 +126,18 @@ class AddedStyleVAET5Encoder(T5Stack):
     def forward(self, *args, **kwargs):
         # get input format (and raise an error if we are missing this argument)
         source_format = kwargs.pop("source")
+        # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
         assert kwargs["return_dict"]
 
         encoder_outputs = super().forward(*args, **kwargs)
         # (N,T,dim) -> (N,dim)
-        mean_sequence = encoder_outputs.last_hidden_state.mean(1)
-
-        if source_format == "graph":
-            mu_s = self.mu_s_x(mean_sequence)
-            log_sigma_s = self.log_sigma_s_x(mean_sequence)
-        elif source_format == "text":
-            mu_s = self.mu_s_y(mean_sequence)
-            log_sigma_s = self.log_sigma_s_y(mean_sequence)
+        if self.use_style_token:
+            # representation of our special [STYLE] token, after encoding
+            style_hidden_state = encoder_outputs.last_hidden_state[:, 0, :].clone()
         else:
-            raise ValueError
+            # simply the mean of encoder outputs sequence
+            style_hidden_state = encoder_outputs.last_hidden_state.mean(dim=1)
 
-        q_phi = Normal(loc=mu_s, scale=torch.exp(log_sigma_s))
-        vae_s = q_phi.rsample()  # dimension (N, dim)
-
-        return VariationalT5EncoderOutput(
-            last_hidden_state=encoder_outputs.last_hidden_state,
-            past_key_values=encoder_outputs.past_key_values,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
-            q_phi=q_phi,
-            vae_latent=vae_s,
-        )
-
-
-class StyleVAET5Encoder(T5Stack):
-    def __init__(self, config: T5Config, embed_tokens: nn.Embedding = None):
-        super().__init__(config, embed_tokens)
-
-        # additional layers for the variational posterior of x, q(s_x|x)
-        model_dim = config.d_model
-        self.mu_s_x = nn.Linear(model_dim, model_dim)
-        self.log_sigma_s_x = nn.Linear(model_dim, model_dim)
-        # and for q(s_y|y)
-        self.mu_s_y = nn.Linear(model_dim, model_dim)
-        self.log_sigma_s_y = nn.Linear(model_dim, model_dim)
-
-    def forward(self, *args, **kwargs):
-        # get input format (and raise an error if we are missing this argument)
-        source_format = kwargs.pop("source")
-        # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
-        assert kwargs["return_dict"]
-
-        encoder_outputs = super().forward(*args, **kwargs)  # (N, T, dim)
-
-        # representation of our special [STYLE] token, after encoding
-        style_hidden_state = encoder_outputs.last_hidden_state[:, 0, :].clone()
         if source_format == "text":
             mu_s = self.mu_s_x(style_hidden_state)
             log_sigma_s = self.log_sigma_s_x(style_hidden_state)
@@ -184,9 +147,8 @@ class StyleVAET5Encoder(T5Stack):
         else:
             raise ValueError
 
-        # variational posterior, and latent variable
         q_phi = Normal(loc=mu_s, scale=torch.exp(log_sigma_s))
-        vae_s = q_phi.rsample()  # same dimension as mu (N, model_dim)
+        vae_s = q_phi.rsample()  # dimension (N, dim)
 
         return VariationalT5EncoderOutput(
             last_hidden_state=encoder_outputs.last_hidden_state,
@@ -824,6 +786,7 @@ class GT8StyleVAE(VAEBase, GT8Base):
         specify_target_with_prefix: bool,
         generate_text_token_id: int,
         generate_graph_token_id: int,
+        use_style_token: bool,
         reg_loss: Optional[str] = None,
     ):
         GT8Base.__init__(
@@ -834,13 +797,22 @@ class GT8StyleVAE(VAEBase, GT8Base):
             generate_graph_token_id=generate_graph_token_id,
         )
         self.reg_loss_type = reg_loss
+        self.use_style_token = use_style_token
+        self.encoder.use_style_token = use_style_token
 
     def get_hidden_states(self, encoder_outputs):
-        hidden_states = encoder_outputs.last_hidden_state  # (N, T, dim)
-        # replace the first token (initially the encoder representation of the
-        # [STYLE] token) with the latent style variable s_x or s_y
-        # Note: cloning is necessary to avoid inplace operations
-        hidden_states[:, 0] = encoder_outputs.vae_latent.clone()
+        if self.use_style_token:
+            # replace the first token (initially the encoder representation of the
+            # [STYLE] token) with the latent style variable s_x or s_y
+            # Note: cloning is necessary to avoid inplace operations
+            hidden_states = encoder_outputs.last_hidden_state  # (N, T, dim)
+            hidden_states[:, 0] = encoder_outputs.vae_latent.clone()
+        else:
+            # add vae_s to each element of the decoder input sequence
+            hidden_states = encoder_outputs.last_hidden_state  # (N, T, dim)
+            vae_s = encoder_outputs.vae_latent.unsqueeze(1).expand_as(hidden_states)
+            hidden_states = hidden_states + vae_s
+
         return hidden_states
 
     def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
@@ -849,82 +821,6 @@ class GT8StyleVAE(VAEBase, GT8Base):
         )
         return recon_loss + self.beta * reg_loss, reg_loss
 
-    @staticmethod
-    def compute_kernel(x: torch.Tensor, y: torch.Tensor):
-        """
-        Compute the k(x,y) values with latent variable samples x,y. All combinations of x and y
-        are considered here (since there is a single latent variable per sequence -> no sequence dimension).
-
-        Input: (N, dim)
-        Output: (N, N)
-        """
-        N, dim = x.shape
-        assert x.shape == y.shape
-
-        tiled_x = x.view(N, 1, dim).repeat(1, N, 1)
-        tiled_y = y.view(1, N, dim).repeat(N, 1, 1)
-
-        # compute RBF kernel k(x,y), shape: (N, N)
-        sigma_sqr = dim ** 2 / 2
-        squared_dist_xy = torch.sum((tiled_x - tiled_y) ** 2, dim=-1)
-        return torch.exp(-0.5 * squared_dist_xy / sigma_sqr)
-
-    def generate_with_target(
-        self,
-        *args,
-        **kwargs,
-    ):
-        # add the 'source' kwarg to the generation (will be passed to encoder)
-        if kwargs["target"] == "text":
-            kwargs["source"] = "graph"
-        elif kwargs["target"] == "graph":
-            kwargs["source"] = "text"
-        else:
-            raise ValueError
-
-        return super().generate_with_target(*args, **kwargs)
-
-
-class GT8AddStyleVAE(VAEBase, GT8Base):
-    encoder_cls = AddedStyleVAET5Encoder
-
-    def __init__(
-        self,
-        config,
-        specify_target_with_prefix: bool,
-        generate_text_token_id: int,
-        generate_graph_token_id: int,
-        reg_loss: Optional[str] = None,
-    ):
-        super().__init__(
-            config,
-            specify_target_with_prefix=specify_target_with_prefix,
-            generate_text_token_id=generate_text_token_id,
-            generate_graph_token_id=generate_graph_token_id,
-        )
-        self.reg_loss_type = reg_loss
-
-    def get_hidden_states(self, encoder_outputs: VariationalT5EncoderOutput):
-        last_hidden_state = (
-            encoder_outputs.last_hidden_state
-            + encoder_outputs.vae_latent.unsqueeze(1).expand_as(
-                encoder_outputs.last_hidden_state
-            )
-        )
-
-        return last_hidden_state
-
-    def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
-        reg_loss = self.compute_reg_loss(
-            q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_latent
-        )
-        # loss = -L_elbo = -log p(x|z) + beta * reg_loss
-        # where reg_loss can be
-        #   - KL(q(z|x) || p(z)) (regular VAE)
-        #   - MMD(q(z) || p(z)) (MMD VAE)
-        return recon_loss + self.beta * reg_loss, reg_loss
-
-    # MMD-VAE specific methods
     @staticmethod
     def compute_kernel(x: torch.Tensor, y: torch.Tensor):
         """

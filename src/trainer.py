@@ -96,11 +96,7 @@ class Seq2seqTrainer:
         self.generate_method = generate_method
         # VAE specific code
         self.vae_model = vae_model
-        self.use_vae = (
-            vae_model == VAEModel.full_vae
-            or vae_model == VAEModel.style_vae
-            or vae_model == VAEModel.added_style_vae
-        )
+        self.use_vae = vae_model == VAEModel.full_vae or vae_model == VAEModel.style_vae
         if self.use_vae:
             self.vae_cycle_loss = vae_cycle_loss
             self.use_cyclical_beta_schedule = beta_n_cycle > -1
@@ -175,14 +171,12 @@ class Seq2seqTrainer:
 
         # if necessary (for the style_vae), add a special [STYLE] token and specify the source format
         kwargs = {}
-        if (
-            self.vae_model == VAEModel.style_vae
-            or self.vae_model == VAEModel.added_style_vae
-        ):
-            kwargs["source"] = source
         if self.vae_model == VAEModel.style_vae:
-            # todo: careful when merging to check that it's the styleVAE with prefix
-            input_ids = add_style_prefix(input_ids=input_ids, tokenizer=self.tokenizer)
+            kwargs["source"] = source
+            if model.use_style_token:
+                input_ids = add_style_prefix(
+                    input_ids=input_ids, tokenizer=self.tokenizer
+                )
 
         att_mask_input = self.get_att_mask(input_ids)
         encoder_outputs = None
@@ -259,22 +253,14 @@ class Seq2seqTrainer:
         self, text_ids: torch.Tensor, graph_ids: torch.Tensor
     ):
         # -- auto loss (regular VAE)
-        text_outputs = self.teach_model_one_step(
-            text_ids, text_ids, target="text", source="text"
-        )
-        graph_outputs = self.teach_model_one_step(
-            graph_ids, graph_ids, target="graph", source="graph"
-        )
+        text_outputs = self.teach_model_one_step(text_ids, text_ids, target="text")
+        graph_outputs = self.teach_model_one_step(graph_ids, graph_ids, target="graph")
 
         # -- cycle loss (single)
-        syn_graph_ids = self.predict(input_ids=text_ids, target="graph", source="text")
-        syn_text_ids = self.predict(input_ids=graph_ids, target="text", source="graph")
-        g2t_outputs = self.teach_model_one_step(
-            syn_graph_ids, text_ids, target="text", source="graph"
-        )
-        t2g_outputs = self.teach_model_one_step(
-            syn_text_ids, graph_ids, target="graph", source="text"
-        )
+        syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
+        syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+        g2t_outputs = self.teach_model_one_step(syn_graph_ids, text_ids, target="text")
+        t2g_outputs = self.teach_model_one_step(syn_text_ids, graph_ids, target="graph")
 
         # total loss
         # loss = (
@@ -436,10 +422,7 @@ class Seq2seqTrainer:
                             outputs = self.compute_loss_unsup_vae_dual(
                                 text_ids=text_ids, graph_ids=graph_ids
                             )
-                    elif (
-                        self.vae_model == VAEModel.style_vae
-                        or self.vae_model == VAEModel.added_style_vae
-                    ):
+                    elif self.vae_model == VAEModel.style_vae:
                         outputs = self.compute_loss_unsup_style_vae(
                             text_ids=text_ids, graph_ids=graph_ids
                         )
