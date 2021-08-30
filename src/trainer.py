@@ -144,7 +144,6 @@ class Seq2seqTrainer:
         retain_graph: bool = False,
         source: str = None,
     ) -> GT8ModelOutput:
-
         """
         Run a forward pass in the model using input_ids, and backward the loss wrt label_ids.
         If necessary, append prefix to input_ids (to specify text/graph target).
@@ -217,7 +216,7 @@ class Seq2seqTrainer:
         instead of input_ids
         """
         # instead of using input ids, we use
-        encoder_outputs = VariationalT5EncoderOutput(vae_z=vae_z)
+        encoder_outputs = VariationalT5EncoderOutput(vae_latent=vae_z)
         self.ddp_model.train()
         outputs = self.ddp_model(
             labels=label_ids,

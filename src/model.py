@@ -124,18 +124,15 @@ class AddedStyleVAET5Encoder(T5Stack):
     def forward(self, *args, **kwargs):
         # get input format (and raise an error if we are missing this argument)
         source_format = kwargs.pop("source")
-        # make sure the output is always BaseModelOutputWithPastAndCrossAttentions
         assert kwargs["return_dict"]
-        # call T5Stack.forward (using forward, not __call__, see
-        # https://discuss.pytorch.org/t/recursionerror-calling-super-call-in-forward/57387)
+
         encoder_outputs = super().forward(*args, **kwargs)
-        mean_sequence = encoder_outputs.last_hidden_state.mean(
-            1
-        )  # (N,T,dim) -> (N,dim)
+        # (N,T,dim) -> (N,dim)
+        mean_sequence = encoder_outputs.last_hidden_state.mean(1)
+
         if source_format == "graph":
             mu_s = self.mu_s_x(mean_sequence)
             log_sigma_s = self.log_sigma_s_x(mean_sequence)
-
         elif source_format == "text":
             mu_s = self.mu_s_y(mean_sequence)
             log_sigma_s = self.log_sigma_s_y(mean_sequence)
@@ -189,7 +186,7 @@ class StyleVAET5Encoder(T5Stack):
 
         # variational posterior, and latent variable
         q_phi = Normal(loc=mu_s, scale=torch.exp(log_sigma_s))
-        vae_s = q_phi.rsample()  # same dimension as mu (N, T, model_dim)
+        vae_s = q_phi.rsample()  # same dimension as mu (N, model_dim)
 
         return VariationalT5EncoderOutput(
             last_hidden_state=encoder_outputs.last_hidden_state,
@@ -207,20 +204,21 @@ class VAEBase(ABC):
     reg_loss_type: str  # to be specified during init
 
     def compute_reg_loss(self, q_phi: Normal, z: torch.Tensor):
-        # N(0,I) prior: same shape (N, T, dim_z) and device than q_phi
+        # N(0,I) prior: same shape and device than q_phi
         prior = Normal(
             loc=torch.zeros_like(q_phi.loc),
             scale=torch.ones_like(q_phi.scale),
         )
 
         if self.reg_loss_type == "kl":
-            # (N, T, dim_z) as well, since kl_divergence on Normal distributions does not reduce result
             kl_div = kl_divergence(q_phi, prior)
+            # (N, T, dim_z) or (N, dim_z), make sure we do have vae_latent on the last dim
+            assert kl_div.shape[-1] == self.model_dim
             # reduce to a scalar by:
             #   - summing over latent dim, to obtain the D_KL between multivariate Normal distributions
             #   - taking the mean over batch and sequence dim, to match the
             #       CrossEntropyLoss (which takes mean over N and T as well)
-            kl_div = kl_div.sum(dim=2).mean()
+            kl_div = kl_div.sum(dim=-1).mean()
             return kl_div
         elif self.reg_loss_type == "mmd":
             # https://github.com/amir-abdi/disentanglement-pytorch/blob/master/models/infovae.py
@@ -244,7 +242,7 @@ class VAEBase(ABC):
         # MMD = E[k(x,x)] + E[k(y,y)] - 2 * E[k(x,y)]
         return torch.mean(x_kernel) + torch.mean(y_kernel) - 2 * torch.mean(xy_kernel)
 
-    # other methods, assuming latent variable is stored in encoder_outputs as vae_z
+    # other methods, assuming latent variable is stored in encoder_outputs as vae_latent
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -262,7 +260,7 @@ class VAEBase(ABC):
             input_ids = input_ids[:, -1:]
 
         if "vae_latent" in kwargs:
-            # use vae_z specified as a kwarg to the generate method
+            # use vae_latent specified as a kwarg to the generate method
             encoder_outputs.vae_latent = kwargs["vae_latent"]
         else:
             # take mu_z (but we could also sample)
@@ -324,7 +322,7 @@ class VAEBase(ABC):
             )
 
             # VAE specific code
-            encoder_outputs["vae_z"] = encoder_outputs.vae_latent.index_select(
+            encoder_outputs["vae_latent"] = encoder_outputs.vae_latent.index_select(
                 0, expanded_return_idx.to(encoder_outputs.vae_latent.device)
             )
             loc = encoder_outputs.q_phi.loc.index_select(
@@ -527,13 +525,14 @@ class GT8Base(T5PreTrainedModel, ABC):
                 recon_loss=recon_loss, encoder_outputs=encoder_outputs
             )
 
+        vae_latent = (
+            encoder_outputs.vae_latent if "vae_latent" in encoder_outputs else None
+        )
         return GT8ModelOutput(
             loss=loss,
             reg_loss=reg_loss,
             recon_loss=recon_loss,
-            vae_latent=encoder_outputs.vae_latent
-            if "vae_latent" in encoder_outputs
-            else None,
+            vae_latent=vae_latent,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
@@ -646,7 +645,7 @@ class GT8Base(T5PreTrainedModel, ABC):
             max_seq_length:
             method: 'greedy', 'beam_search', 'sample' or 'top_k'
             num_beams: Used only when method='beam_search'
-            other_kwargs: 'vae_z' or 'source' format for instance. Will be passed to the model and the encoder
+            other_kwargs: 'vae_latent' or 'source' format for instance. Will be passed to the model and the encoder
 
         Returns:
 
