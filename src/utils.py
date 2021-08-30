@@ -27,7 +27,6 @@ class VAEModel(Enum):
     non_vae = "non_vae"
     full_vae = "full_vae"
     style_vae = "style_vae"
-    added_style_vae = "added_style_vae"
 
 
 class CycleVAELoss(Enum):
