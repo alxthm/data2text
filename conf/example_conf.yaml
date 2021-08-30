@@ -15,13 +15,13 @@ lr_scheduler: "linear"  # can also be 'constant'
 batch_size_train: 4
 max_grad_norm: 1.0
 # -- specific to VAE
-use_vae: True
 vae:
-  cycle_loss: "dual"  # 'single' or 'dual', the cycle VAE loss
+  model: "style_vae"  # 'non_vae', 'full_vae' or 'style_vae'
+  cycle_loss: "single"  # 'single' or 'dual', the cycle VAE loss (only for the 'full_vae')
+  use_style_token: False  # (only for the 'style_vae')
   reg: "mmd"  # 'kl' for a regular VAE, 'mmd' for a MMD-VAE, the regularisation loss
   beta: 10.  # coefficient in front of the VAE regularisation loss (KL or MMD)
   beta_n_cycle: -1  # number of cycles for the beta-VAE schedule (-1 for regular VAE: constant beta=1)
-  model: "style_vae" 
 # -- specific to unsupervised
 generate_method: "greedy"  # 'greedy', 'sample', 'top_k'
 sample_noise_fun:  # which noise functions to sample from?
