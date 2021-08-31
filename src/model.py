@@ -77,7 +77,7 @@ class GT8ModelOutput(ModelOutput):
     reg_loss: Optional[torch.FloatTensor] = None
 
 
-class VariationalT5Encoder(T5Stack):
+class FullVAET5Encoder(T5Stack):
     def __init__(self, config: T5Config, embed_tokens: nn.Embedding = None):
         super().__init__(config, embed_tokens)
 
@@ -300,7 +300,7 @@ class VAEBase(ABC):
         return input_ids, model_kwargs
 
 
-class GT8Base(T5PreTrainedModel, ABC):
+class GT8Base(T5PreTrainedModel):
     # Based on T5ForConditionalGeneration, from transformers 4.9.1
     # https://huggingface.co/transformers/_modules/transformers/models/t5/modeling_t5.html#T5ForConditionalGeneration
     _keys_to_ignore_on_load_missing = [
@@ -370,140 +370,6 @@ class GT8Base(T5PreTrainedModel, ABC):
 
     def get_decoder(self):
         return self.decoder
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        decoder_input_ids=None,
-        decoder_attention_mask=None,
-        head_mask=None,
-        decoder_head_mask=None,
-        cross_attn_head_mask=None,
-        encoder_outputs=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        decoder_inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        target=None,
-        source=None,
-    ):
-        """
-        target: Target format (can be "graph" or "text"). Only used when we don't specify it
-        already with an added prefix in the inputs, otherwise it can be None.
-        source: Source format ("graph" or "text"), passed to the encoder if it's not None.
-        """
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
-        # -> just make sure this is never overridden to False
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-        assert return_dict
-        # same for model_parallel (and make sure we don't use it)
-        assert not self.model_parallel
-        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
-        if head_mask is not None and decoder_head_mask is None:
-            if self.config.num_layers == self.config.num_decoder_layers:
-                warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
-                decoder_head_mask = head_mask
-
-        # Encode if needed (training). Note: even in training, in some cases we might
-        # want to re-use the same encoder_outputs (CycleVAE dual loss)
-        if encoder_outputs is None:
-            other_encoder_kwargs = {}
-            if source is not None:
-                other_encoder_kwargs["source"] = source
-            encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                inputs_embeds=inputs_embeds,
-                head_mask=head_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                **other_encoder_kwargs,
-            )
-
-        # to be fed to the decoder
-        hidden_states = self.get_hidden_states(encoder_outputs)
-
-        if (
-            labels is not None
-            and decoder_input_ids is None
-            and decoder_inputs_embeds is None
-        ):
-            # get decoder inputs from shifting lm labels to the right
-            decoder_input_ids = self._shift_right(input_ids=labels, target=target)
-
-        # If decoding with past key value states, only the last tokens
-        # should be given as an input
-        if past_key_values is not None:
-            assert (
-                labels is None
-            ), "Decoder should not use cached key value states when training."
-            if decoder_input_ids is not None:
-                decoder_input_ids = decoder_input_ids[:, -1:]
-            if decoder_inputs_embeds is not None:
-                decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
-
-        # Decode
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            inputs_embeds=decoder_inputs_embeds,
-            past_key_values=past_key_values,
-            encoder_hidden_states=hidden_states,
-            encoder_attention_mask=attention_mask,
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        sequence_output = decoder_outputs.last_hidden_state
-
-        if self.config.tie_word_embeddings:
-            # Rescale output before projecting on vocab
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-            sequence_output = sequence_output * (self.model_dim ** -0.5)
-
-        lm_logits = self.lm_head(sequence_output)
-
-        loss, recon_loss, reg_loss = None, None, None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss(ignore_index=-100)
-            recon_loss = loss_fct(
-                lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1)
-            )
-
-            loss, reg_loss = self.get_total_loss(
-                recon_loss=recon_loss, encoder_outputs=encoder_outputs
-            )
-
-        vae_latent = (
-            encoder_outputs.vae_latent if "vae_latent" in encoder_outputs else None
-        )
-        return GT8ModelOutput(
-            loss=loss,
-            reg_loss=reg_loss,
-            recon_loss=recon_loss,
-            vae_latent=vae_latent,
-            logits=lm_logits,
-            past_key_values=decoder_outputs.past_key_values,
-            decoder_hidden_states=decoder_outputs.hidden_states,
-            decoder_attentions=decoder_outputs.attentions,
-            cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
-        )
 
     def _reorder_cache(self, past, beam_idx):
         # if decoder past is not included in output
@@ -659,30 +525,9 @@ class GT8Base(T5PreTrainedModel, ABC):
             prediction_ids = self.generate(**kwargs)
         return prediction_ids
 
-    @abstractmethod
-    def get_hidden_states(self, encoder_outputs):
-        pass
-
-    @abstractmethod
-    def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
-        """
-        Return (loss, reg_loss), with
-            - loss: the total loss (objective to minimize)
-            - reg_loss: the regularization loss (which can be None), e.g. KL div or MMD
-        """
-        pass
-
 
 class GT8NonVAE(GT8Base):
     encoder_cls = T5Stack
-
-    def get_hidden_states(
-        self, encoder_outputs: BaseModelOutputWithPastAndCrossAttentions
-    ):
-        return encoder_outputs.last_hidden_state
-
-    def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
-        return recon_loss, None
 
     def prepare_inputs_for_generation(
         self,
@@ -711,9 +556,124 @@ class GT8NonVAE(GT8Base):
         }
         return inputs
 
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        decoder_inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        target=None,
+    ):
+        """
+        target: Target format (can be "graph" or "text"). Only used when we don't specify it
+        already with an added prefix in the inputs, otherwise it can be None.
+        """
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
+        # -> just make sure this is never overridden to False
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+        assert return_dict
+        # same for model_parallel (and make sure we don't use it)
+        assert not self.model_parallel
+        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
+        if head_mask is not None and decoder_head_mask is None:
+            if self.config.num_layers == self.config.num_decoder_layers:
+                warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
+                decoder_head_mask = head_mask
+
+        # Encode if needed (training)
+        if encoder_outputs is None:
+            encoder_outputs = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                head_mask=head_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+        # to be fed to the decoder
+        hidden_states = encoder_outputs.last_hidden_state
+
+        if (
+            labels is not None
+            and decoder_input_ids is None
+            and decoder_inputs_embeds is None
+        ):
+            # get decoder inputs from shifting lm labels to the right
+            decoder_input_ids = self._shift_right(input_ids=labels, target=target)
+
+        # If decoding with past key value states, only the last tokens
+        # should be given as an input
+        if past_key_values is not None:
+            assert (
+                labels is None
+            ), "Decoder should not use cached key value states when training."
+            if decoder_input_ids is not None:
+                decoder_input_ids = decoder_input_ids[:, -1:]
+            if decoder_inputs_embeds is not None:
+                decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
+
+        # Decode
+        decoder_outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
+            inputs_embeds=decoder_inputs_embeds,
+            past_key_values=past_key_values,
+            encoder_hidden_states=hidden_states,
+            encoder_attention_mask=attention_mask,
+            head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = decoder_outputs.last_hidden_state
+
+        if self.config.tie_word_embeddings:
+            # Rescale output before projecting on vocab
+            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+            sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+        lm_logits = self.lm_head(sequence_output)
+
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
+
+        return GT8ModelOutput(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
+
 
 class GT8FullVAE(VAEBase, GT8Base):
-    encoder_cls = VariationalT5Encoder
+    encoder_cls = FullVAET5Encoder
 
     def __init__(
         self,
@@ -732,22 +692,9 @@ class GT8FullVAE(VAEBase, GT8Base):
         )
         self.reg_loss_type = reg_loss
 
-    def get_hidden_states(self, encoder_outputs: VariationalT5EncoderOutput):
-        return encoder_outputs.vae_latent
-
-    def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
-        reg_loss = self.compute_reg_loss(
-            q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_latent
-        )
-        # loss = -L_elbo = -log p(x|z) + beta * reg_loss
-        # where reg_loss can be
-        #   - KL(q(z|x) || p(z)) (regular VAE)
-        #   - MMD(q(z) || p(z)) (MMD VAE)
-        return recon_loss + self.beta * reg_loss, reg_loss
-
     def compute_reg_loss(self, q_phi: Optional[Normal], z: torch.Tensor):
         if q_phi is None:
-            # CycleVAE loss dual: we are computing the second reconstruction term only (e.g. log p(y_hat|z)
+            # FullVAE cycle loss dual: we are computing the second reconstruction term only (e.g. log p(y_hat|z)
             # with previously computed z~q(z|y_hat)), we remove the regularisation term
             return 0.0
 
@@ -775,6 +722,135 @@ class GT8FullVAE(VAEBase, GT8Base):
         sigma_sqr = dim ** 2 / 2
         squared_dist_xy = torch.sum((tiled_x - tiled_y) ** 2, dim=-1)
         return torch.exp(-0.5 * squared_dist_xy / sigma_sqr)
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        decoder_inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        target=None,
+    ):
+        """
+        target: Target format (can be "graph" or "text"). Only used when we don't specify it
+        already with an added prefix in the inputs, otherwise it can be None.
+        """
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
+        # -> just make sure this is never overridden to False
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+        assert return_dict
+        # same for model_parallel (and make sure we don't use it)
+        assert not self.model_parallel
+        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
+        if head_mask is not None and decoder_head_mask is None:
+            if self.config.num_layers == self.config.num_decoder_layers:
+                warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
+                decoder_head_mask = head_mask
+
+        # Encode if needed (training). Note: even in training, in some cases we might
+        # want to re-use the same encoder_outputs (CycleVAE dual loss)
+        if encoder_outputs is None:
+            encoder_outputs = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                head_mask=head_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+        # to be fed to the decoder
+        hidden_states = encoder_outputs.vae_latent
+
+        if (
+            labels is not None
+            and decoder_input_ids is None
+            and decoder_inputs_embeds is None
+        ):
+            # get decoder inputs from shifting lm labels to the right
+            decoder_input_ids = self._shift_right(input_ids=labels, target=target)
+
+        # If decoding with past key value states, only the last tokens
+        # should be given as an input
+        if past_key_values is not None:
+            assert (
+                labels is None
+            ), "Decoder should not use cached key value states when training."
+            if decoder_input_ids is not None:
+                decoder_input_ids = decoder_input_ids[:, -1:]
+            if decoder_inputs_embeds is not None:
+                decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
+
+        # Decode
+        decoder_outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
+            inputs_embeds=decoder_inputs_embeds,
+            past_key_values=past_key_values,
+            encoder_hidden_states=hidden_states,
+            encoder_attention_mask=attention_mask,
+            head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = decoder_outputs.last_hidden_state
+
+        if self.config.tie_word_embeddings:
+            # Rescale output before projecting on vocab
+            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+            sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+        lm_logits = self.lm_head(sequence_output)
+
+        loss, recon_loss, reg_loss = None, None, None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
+            recon_loss = loss_fct(
+                lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1)
+            )
+            reg_loss = self.compute_reg_loss(
+                q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_latent
+            )
+            # loss = -L_elbo = -log p(x|z) + beta * reg_loss
+            # where reg_loss can be
+            #   * KL(q(z|x) || p(z)) (regular VAE)
+            #   * MMD(q(z) || p(z)) (MMD VAE)
+            loss = recon_loss + self.beta * reg_loss
+
+        return GT8ModelOutput(
+            loss=loss,
+            reg_loss=reg_loss,
+            recon_loss=recon_loss,
+            vae_latent=encoder_outputs.vae_latent,
+            logits=lm_logits,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
 
 
 class GT8StyleVAE(VAEBase, GT8Base):
@@ -815,11 +891,15 @@ class GT8StyleVAE(VAEBase, GT8Base):
 
         return hidden_states
 
-    def get_total_loss(self, recon_loss: torch.Tensor, encoder_outputs):
-        reg_loss = self.compute_reg_loss(
-            q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_latent
-        )
-        return recon_loss + self.beta * reg_loss, reg_loss
+    def compute_reg_loss(self, q_phi: Optional[Normal], z: torch.Tensor):
+        if q_phi is None:
+            # StyleVAE recon_loss: we are computing the reconstruction term only
+            # (e.g. log p(x|y_hat,s_x) with previously computed s_x~q(s_x|x)),
+            # we remove the regularisation term (already computed when getting s_x)
+            return 0.0
+
+        # in all other cases, compute regularization loss as usual
+        return super().compute_reg_loss(q_phi, z)
 
     @staticmethod
     def compute_kernel(x: torch.Tensor, y: torch.Tensor):
@@ -855,3 +935,167 @@ class GT8StyleVAE(VAEBase, GT8Base):
             raise ValueError
 
         return super().generate_with_target(*args, **kwargs)
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        decoder_inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        target=None,
+        source=None,
+    ):
+        """
+        target: Target format (can be "graph" or "text"). Only used when we don't specify it
+        already with an added prefix in the inputs, otherwise it can be None.
+        source: Source format ("graph" or "text"), passed to the encoder if it's not None.
+        """
+        if input_ids is not None and labels is None and encoder_outputs is None:
+            return self.encode_and_compute_reg_loss(
+                input_ids=input_ids, attention_mask=attention_mask, source=source
+            )
+
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        # make things easier to read by using ModelOutputs objects for encoder/decoder outputs
+        # -> just make sure this is never overridden to False
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+        assert return_dict
+        # same for model_parallel (and make sure we don't use it)
+        assert not self.model_parallel
+        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
+        if head_mask is not None and decoder_head_mask is None:
+            if self.config.num_layers == self.config.num_decoder_layers:
+                warnings.warn(_HEAD_MASK_WARNING_MSG, FutureWarning)
+                decoder_head_mask = head_mask
+
+        # Encode if needed
+        if encoder_outputs is None:
+            # training: regular auto loss, or cycle reg_loss without labels
+            encoder_outputs = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                head_mask=head_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                source=source,
+            )
+        elif list(encoder_outputs.keys()) == ["vae_latent"]:
+            # training: cycle recon_loss
+            vae_s = encoder_outputs.vae_latent
+            encoder_outputs = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                head_mask=head_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                source=source,
+            )
+            # use previously computed s_y~q_phi(s_y|y) instead of s_x
+            encoder_outputs.vae_latent = vae_s
+            # don't use q_phi(s_x|x) (since we already computed reg_loss with q_phi(s_y|y))
+            encoder_outputs.q_phi = None
+
+        # to be fed to the decoder
+        hidden_states = self.get_hidden_states(encoder_outputs)
+
+        if (
+            labels is not None
+            and decoder_input_ids is None
+            and decoder_inputs_embeds is None
+        ):
+            # get decoder inputs from shifting lm labels to the right
+            decoder_input_ids = self._shift_right(input_ids=labels, target=target)
+
+        # If decoding with past key value states, only the last tokens
+        # should be given as an input
+        if past_key_values is not None:
+            assert (
+                labels is None
+            ), "Decoder should not use cached key value states when training."
+            if decoder_input_ids is not None:
+                decoder_input_ids = decoder_input_ids[:, -1:]
+            if decoder_inputs_embeds is not None:
+                decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
+
+        # Decode
+        decoder_outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
+            inputs_embeds=decoder_inputs_embeds,
+            past_key_values=past_key_values,
+            encoder_hidden_states=hidden_states,
+            encoder_attention_mask=attention_mask,
+            head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = decoder_outputs.last_hidden_state
+
+        if self.config.tie_word_embeddings:
+            # Rescale output before projecting on vocab
+            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+            sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+        lm_logits = self.lm_head(sequence_output)
+
+        loss, recon_loss, reg_loss = None, None, None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
+            recon_loss = loss_fct(
+                lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1)
+            )
+            reg_loss = self.compute_reg_loss(
+                q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_latent
+            )
+            loss = recon_loss + self.beta * reg_loss
+
+        return GT8ModelOutput(
+            loss=loss,
+            reg_loss=reg_loss,
+            recon_loss=recon_loss,
+            vae_latent=encoder_outputs.vae_latent,
+            logits=lm_logits,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
+
+    def encode_and_compute_reg_loss(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, source: str
+    ):
+        """
+        Only do the encoding part of the forward, to encode input_ids and obtain a vae_s sample, as well as reg_loss
+        """
+        encoder_outputs = self.encoder(
+            input_ids=input_ids, attention_mask=attention_mask, source=source, return_dict=True
+        )
+        reg_loss = self.compute_reg_loss(
+            q_phi=encoder_outputs.q_phi, z=encoder_outputs.vae_latent
+        )
+        return GT8ModelOutput(reg_loss=reg_loss, vae_latent=encoder_outputs.vae_latent)

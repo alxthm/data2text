@@ -168,7 +168,7 @@ def add_target_prefix(
     elif target == "graph":
         prefix = "Generate graph: "
     else:
-        return ValueError
+        raise ValueError
 
     # decode input id sequence (batch of tokenized inputs), and add prefix
     input_str = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
