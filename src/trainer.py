@@ -135,10 +135,11 @@ class Seq2seqTrainer:
     def teach_model_one_step(
         self,
         input_ids: Optional[torch.Tensor],
-        label_ids: torch.Tensor,
-        target: str,
+        label_ids: Optional[torch.Tensor],
+        target: Optional[str],
+        vae_latent: Optional[torch.Tensor] = None,
         retain_graph: bool = False,
-        source: str = None,
+        source: Optional[str] = None,
     ) -> GT8ModelOutput:
         """
         Run a forward pass in the model using input_ids, and backward the loss wrt label_ids.
@@ -152,72 +153,81 @@ class Seq2seqTrainer:
                 determine the prefix to add to input_ids, or the token to specify to the decoder
             retain_graph: passed to the backward (default: False)
             source: None by default, otherwise 'text' or 'graph' and passed to model forward
+            vae_latent:
 
         Returns:
             model_outputs
 
         """
-        model = self.accelerator.unwrap_model(self.ddp_model)
-        if model.specify_target_with_prefix:
-            # add the prefix "generate graph/text" to the input
-            # (if model.specify_target_with_prefix=False, the model handles this itself
-            # and uses the right decoder_start_token_id in the forward)
-            input_ids = add_target_prefix(
-                input_ids=input_ids,
-                target=target,
-                tokenizer=self.tokenizer,
-                max_seq_len=self.max_seq_length,
+        assert (
+            # regular recon_loss (+reg_loss for VAE):
+            #   * log p(y|x), for non_vae
+            #   * log p(y|z) - KL(q_phi(z|x) || p(z)), with z~q_phi(z|x) for full_vae (single or dual)
+            (input_ids is not None and label_ids is not None and vae_latent is None)
+            # full_vae dual loss: log p(y|z), with previously sampled z
+            or (input_ids is None and label_ids is not None and vae_latent is not None)
+            # style_vae reg_loss: -KL(q_phi(s_y|y) || p(s_y)), and sample s_y~q_phi(s_y|y)
+            or (input_ids is not None and label_ids is None and vae_latent is None)
+            # style_vae recon_loss: log p(y|x,s_y), with previously sampled s_y
+            or (
+                input_ids is not None
+                and label_ids is not None
+                and vae_latent is not None
             )
+        )
 
-        # if necessary (for the style_vae), add a special [STYLE] token and specify the source format
-        kwargs = {}
-        if self.vae_model == VAEModel.style_vae:
-            kwargs["source"] = source
-            if model.use_style_token:
-                input_ids = add_style_prefix(
-                    input_ids=input_ids, tokenizer=self.tokenizer
+        model = self.accelerator.unwrap_model(self.ddp_model)
+        kwargs = {}  # model forward kwargs
+
+        if input_ids is not None:
+            if model.specify_target_with_prefix:
+                # add the prefix "generate graph/text" to the input
+                # (if model.specify_target_with_prefix=False, the model handles this itself
+                # and uses the right decoder_start_token_id in the forward)
+                input_ids = add_target_prefix(
+                    input_ids=input_ids,
+                    target=target,
+                    tokenizer=self.tokenizer,
+                    max_seq_len=self.max_seq_length,
                 )
 
-        att_mask_input = self.get_att_mask(input_ids)
-        encoder_outputs = None
+            if source is not None:
+                kwargs["source"] = source
+                if model.use_style_token:
+                    input_ids = add_style_prefix(
+                        input_ids=input_ids, tokenizer=self.tokenizer
+                    )
+
+            kwargs["input_ids"] = input_ids
+            kwargs["attention_mask"] = self.get_att_mask(input_ids)
+        else:
+            assert vae_latent is not None
+
+        if vae_latent is not None:
+            # vae_latent can be used in place (full_vae) or in addition (style_vae) to input_ids
+            kwargs["encoder_outputs"] = VariationalT5EncoderOutput(
+                vae_latent=vae_latent
+            )
+
+        if label_ids is not None:
+            kwargs["target"] = target
+            kwargs["labels"] = label_ids
 
         self.ddp_model.train()
-        outputs = self.ddp_model(
-            input_ids=input_ids,
-            attention_mask=att_mask_input,
-            labels=label_ids,
-            target=target,
-            encoder_outputs=encoder_outputs,
-            **kwargs,
-        )
+        outputs = self.ddp_model(**kwargs)
+        if vae_latent is not None:
+            assert outputs.reg_loss == 0.0
+            loss = outputs.recon_loss
+        elif label_ids is None:
+            loss = outputs.reg_loss
+        else:
+            loss = outputs.loss
         # we call loss.backward() here to free GPU memory for the next steps
         # -> computed gradients are kept in the leaf variables (the parameters)
         # -> but the computational graph is removed elsewhere
         # -> equivalent to calling backward on the sum of the losses, since gradients
         #   are added until we call .zero_grad()
-        self.accelerator.backward(outputs.loss, retain_graph=retain_graph)
-        return outputs
-
-    def teach_model_one_step_with_vae_z(
-        self,
-        label_ids: torch.Tensor,
-        target: str,
-        vae_z: Optional[torch.FloatTensor] = None,
-    ):
-        """
-        (Only used by the GT8FullVAE model, with dual cycle loss)
-        Run a forward pass re-using some vae_z already computed from some input_ids,
-        instead of input_ids
-        """
-        # instead of using input ids, we use
-        encoder_outputs = VariationalT5EncoderOutput(vae_latent=vae_z)
-        self.ddp_model.train()
-        outputs = self.ddp_model(
-            labels=label_ids,
-            target=target,
-            encoder_outputs=encoder_outputs,
-        )
-        self.accelerator.backward(outputs.loss)
+        self.accelerator.backward(loss, retain_graph=retain_graph)
         return outputs
 
     def compute_loss_unsup_non_vae(
@@ -286,28 +296,23 @@ class Seq2seqTrainer:
         # we need retain_graph=True since in the next step we'll backward through vae_z again
         g2t_outputs = self.teach_model_one_step(
             syn_graph_ids, text_ids, target="text", retain_graph=True
-        )
-        g2t_outputs_bis = self.teach_model_one_step_with_vae_z(
-            syn_graph_ids, target="graph", vae_z=g2t_outputs.vae_latent
-        )
+        )  # log p(x|z) - KL(q(z|y_hat) || p(z)), with z~q(z|y_hat)
+        g2t_outputs_bis = self.teach_model_one_step(
+            input_ids=None,
+            label_ids=syn_graph_ids,
+            target="graph",
+            vae_latent=g2t_outputs.vae_latent,
+        )  # log p(y_hat|z), with the same z
         t2g_outputs = self.teach_model_one_step(
             syn_text_ids, graph_ids, target="graph", retain_graph=True
         )
-        t2g_outputs_bis = self.teach_model_one_step_with_vae_z(
-            syn_text_ids, target="text", vae_z=t2g_outputs.vae_latent
+        t2g_outputs_bis = self.teach_model_one_step(
+            input_ids=None,
+            label_ids=syn_text_ids,
+            target="text",
+            vae_latent=t2g_outputs.vae_latent,
         )
 
-        # total loss
-        # loss = (
-        #     text_outputs.loss
-        #     + graph_outputs.loss
-        #     # with the same z~q(z|y_hat)
-        #     + g2t_outputs.loss  # log p(x|z) - KL(q(z|y_hat) || p(z))
-        #     + g2t_outputs_bis.recon_loss  # log p(y_hat|z)
-        #     # idem, with the same z~q(z|x_hat)
-        #     + t2g_outputs.loss
-        #     + t2g_outputs_bis.recon_loss
-        # )
         return {
             "text": text_outputs,
             "graph": graph_outputs,
@@ -323,6 +328,7 @@ class Seq2seqTrainer:
         # -- auto loss (style VAE)
         noisy_text_ids = self.get_noisy_inputs(text_ids, is_graph=False)
         noisy_graph_ids = self.get_noisy_inputs(graph_ids, is_graph=True)
+        # log p(x|z) - KL(q(z|x_noisy) || p(z)), with z~q(z|x_noisy)
         text_outputs = self.teach_model_one_step(
             noisy_text_ids, text_ids, source="text", target="text"
         )
@@ -333,18 +339,43 @@ class Seq2seqTrainer:
         # -- cycle loss (style VAE)
         syn_graph_ids = self.predict(input_ids=text_ids, target="graph")
         syn_text_ids = self.predict(input_ids=graph_ids, target="text")
+        # specify target to work with generate_text/graph_token_id, and keep coherent inputs
+        g2t_outputs_bis = self.teach_model_one_step(
+            input_ids=text_ids,
+            label_ids=None,
+            source="text",
+            target="text",
+            retain_graph=True,
+        )  # - KL(q(s_x|x) || p(s_x)), and obtain s_x~q(s_x|x)
         g2t_outputs = self.teach_model_one_step(
-            syn_graph_ids, text_ids, source="graph", target="text"
+            input_ids=syn_graph_ids,
+            label_ids=text_ids,
+            vae_latent=g2t_outputs_bis.vae_latent,
+            source="graph",
+            target="text",
+        )  # log p(x|y_hat,z), with the same z
+        t2g_outputs_bis = self.teach_model_one_step(
+            input_ids=graph_ids,
+            label_ids=None,
+            source="graph",
+            target="graph",
+            retain_graph=True,
         )
         t2g_outputs = self.teach_model_one_step(
-            syn_text_ids, graph_ids, source="text", target="graph"
+            input_ids=syn_text_ids,
+            label_ids=graph_ids,
+            vae_latent=t2g_outputs_bis.vae_latent,
+            source="text",
+            target="graph",
         )
 
         return {
             "text": text_outputs,
             "graph": graph_outputs,
             "t2g": t2g_outputs,
+            "t2g_bis": t2g_outputs_bis,
             "g2t": g2t_outputs,
+            "g2t_bis": g2t_outputs_bis,
         }
 
     def train(self):
@@ -505,7 +536,8 @@ class Seq2seqTrainer:
         for mode, outputs in model_outputs.items():
             # for each mode (t2g, g2t, text, ...), log our regular and vae metrics
             outputs = model_outputs[mode]
-            metrics[f"train/loss_{mode}"] = outputs.loss.item()
+            if "loss" in outputs:
+                metrics[f"train/loss_{mode}"] = outputs.loss.item()
             if "recon_loss" in outputs:
                 metrics[f"train/recon_loss_{mode}"] = outputs.recon_loss.item()
             if "reg_loss" in outputs and isinstance(outputs.reg_loss, torch.Tensor):
