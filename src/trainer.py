@@ -12,6 +12,7 @@ from transformers import (
     get_scheduler,
     default_data_collator,
     PreTrainedTokenizer,
+    get_cosine_with_hard_restarts_schedule_with_warmup,
 )
 from accelerate import Accelerator
 
@@ -84,12 +85,20 @@ class Seq2seqTrainer:
             self.max_training_steps = len(self.train_dataloader)
         num_training_steps = num_epochs * self.max_training_steps
         self.num_epochs = num_epochs
-        self.lr_scheduler = get_scheduler(
-            name=lr_scheduler,
-            optimizer=self.optimizer,
-            num_warmup_steps=0,
-            num_training_steps=num_training_steps,
-        )
+        if lr_scheduler == "cosine_with_restarts":
+            self.lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
+                optimizer=self.optimizer,
+                num_warmup_steps=0,
+                num_training_steps=num_training_steps,
+                num_cycles=4,
+            )
+        else:
+            self.lr_scheduler = get_scheduler(
+                name=lr_scheduler,
+                optimizer=self.optimizer,
+                num_warmup_steps=0,
+                num_training_steps=num_training_steps,
+            )
         self.max_seq_length = train_dataset.max_seq_length
         self.max_grad_norm = max_grad_norm
         self.noise_functions = noise_fn
