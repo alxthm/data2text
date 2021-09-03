@@ -59,6 +59,8 @@ def main(timestamp: str):
     conf.num_processes = accelerator.num_processes
     logging.info(OmegaConf.to_yaml(conf))
     run_name = f"{timestamp}-{conf.mode}-{conf.model}-{conf.vae.model}"
+    if conf.mode == "both_unsup":
+        run_name += f"-{conf.generate_method}"
     if vae_model == VAEModel.full_vae:
         run_name += f"-{conf.vae.cycle_loss}"
 
